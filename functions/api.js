@@ -72,10 +72,11 @@ async function getGoogleJwks() {
 }
 
 async function verifyFirebaseToken(idToken, projectId) {
-  if (!idToken || !projectId) return null;
+  if (!idToken) return { uid: null, reason: 'idToken ausente (front não enviou nenhum token)' };
+  if (!projectId) return { uid: null, reason: 'FIREBASE_PROJECT_ID não configurado nesta function' };
 
   const parts = idToken.split('.');
-  if (parts.length !== 3) return null;
+  if (parts.length !== 3) return { uid: null, reason: 'idToken malformado (não é um JWT)' };
   const [headerB64, payloadB64, sigB64] = parts;
 
   let header, payload;
@@ -83,31 +84,31 @@ async function verifyFirebaseToken(idToken, projectId) {
     header = JSON.parse(base64UrlDecode(headerB64));
     payload = JSON.parse(base64UrlDecode(payloadB64));
   } catch (_) {
-    return null;
+    return { uid: null, reason: 'idToken malformado (payload/header não decodifica)' };
   }
 
   // Checagens de validade do payload, conforme a documentação do
   // Firebase para verificação manual de ID Tokens.
   const now = Math.floor(Date.now() / 1000);
-  if (!payload.exp || payload.exp < now) return null;
-  if (!payload.iat || payload.iat > now + 60) return null; // tolerância de relógio
-  if (payload.aud !== projectId) return null;
-  if (payload.iss !== `https://securetoken.google.com/${projectId}`) return null;
-  if (!payload.sub || typeof payload.sub !== 'string') return null;
-  if (header.alg !== 'RS256') return null;
+  if (!payload.exp || payload.exp < now) return { uid: null, reason: 'token expirado' };
+  if (!payload.iat || payload.iat > now + 60) return { uid: null, reason: 'token com iat no futuro (relógio)' };
+  if (payload.aud !== projectId) return { uid: null, reason: `aud do token (${payload.aud}) != FIREBASE_PROJECT_ID (${projectId})` };
+  if (payload.iss !== `https://securetoken.google.com/${projectId}`) return { uid: null, reason: `iss do token (${payload.iss}) inesperado` };
+  if (!payload.sub || typeof payload.sub !== 'string') return { uid: null, reason: 'token sem sub (uid)' };
+  if (header.alg !== 'RS256') return { uid: null, reason: `alg inesperado: ${header.alg}` };
 
   const kid = header.kid;
-  if (!kid) return null;
+  if (!kid) return { uid: null, reason: 'token sem kid no header' };
 
   const jwks = await getGoogleJwks();
-  if (!jwks || !jwks.keys) return null;
+  if (!jwks || !jwks.keys) return { uid: null, reason: 'não foi possível buscar as chaves públicas do Google (fetch externo falhou)' };
   const jwk = jwks.keys.find(k => k.kid === kid);
-  if (!jwk) return null;
+  if (!jwk) return { uid: null, reason: 'kid do token não encontrado nas chaves públicas atuais do Google' };
 
   const valid = await verifySignatureRS256(`${headerB64}.${payloadB64}`, sigB64, jwk);
-  if (!valid) return null;
+  if (!valid) return { uid: null, reason: 'assinatura do token inválida' };
 
-  return payload.sub; // Firebase UID real e criptograficamente verificado
+  return { uid: payload.sub, reason: null }; // Firebase UID real e criptograficamente verificado
 }
 
 function base64UrlDecode(str) {
@@ -181,9 +182,15 @@ async function handleRequest(context) {
   let uid = null;
   if (AUTH_REQUIRED.has(action)) {
     const idToken = body.idToken || request.headers.get('x-firebase-token');
-    uid = await verifyFirebaseToken(idToken, env.FIREBASE_PROJECT_ID);
+    const authResult = await verifyFirebaseToken(idToken, env.FIREBASE_PROJECT_ID);
+    uid = authResult.uid;
     if (!uid) {
-      return jsonErr('Não autenticado. Faça login novamente.', 401);
+      // Diagnóstico temporário: inclui o motivo exato da falha na própria
+      // mensagem que já aparece na tela do usuário, pra identificar a causa
+      // sem precisar de DevTools. Reverter para 'Não autenticado. Faça
+      // login novamente.' (sem o motivo) depois de identificar e corrigir
+      // a causa raiz, pra não expor detalhes internos em produção.
+      return jsonErr('Não autenticado [DIAG: ' + authResult.reason + ']', 401);
     }
   }
 
@@ -434,4 +441,3 @@ export async function onRequestOptions() {
     },
   });
 }
-
