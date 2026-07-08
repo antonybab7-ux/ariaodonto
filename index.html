@@ -763,6 +763,34 @@ body::before, body::after { content: none; }
 .modal-label{font-family:'Inter Tight',sans-serif;font-size:7px;letter-spacing:2px;color:var(--ac-text-label);text-transform:uppercase;margin-bottom:5px;display:block;}
 select.modal-field option{background:var(--ac-sidebar-bg);color:var(--ac-text-primary);}
 .modal-actions{display:flex;gap:8px;margin-top:20px;}
+
+/* ── INPUTS NATIVOS (date/select) — alinhados ao design system ── */
+.ac-form-input{
+  width:100%;background:var(--ac-input-bg);
+  border:1px solid rgba(var(--ac-accent-rgb),0.15);border-radius:12px;
+  padding:12px 14px;color:var(--ac-text-primary);
+  font-family:'Syne',sans-serif;font-size:13px;outline:none;
+  transition:border .2s;display:block;color-scheme:dark;
+}
+[data-theme=light] .ac-form-input{color-scheme:light;}
+.ac-form-input:focus{border-color:rgba(var(--ac-accent-rgb),0.4);}
+.fin-field{color-scheme:dark;}
+[data-theme=light] .fin-field{color-scheme:light;}
+/* Ícone do calendário nativo — recolorido para acompanhar o tema */
+input[type="date"]::-webkit-calendar-picker-indicator{
+  filter:invert(1) opacity(.55);cursor:pointer;
+}
+[data-theme=light] input[type="date"]::-webkit-calendar-picker-indicator{
+  filter:none;opacity:.55;
+}
+/* Seta nativa do <select> — substituída por uma seta customizada */
+select.fin-field,select.ac-form-input{
+  appearance:none;-webkit-appearance:none;-moz-appearance:none;
+  background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%235c8def' stroke-width='2'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+  background-repeat:no-repeat;background-position:right 12px center;background-size:14px;
+  padding-right:34px;cursor:pointer;
+}
+select.fin-field option,select.ac-form-input option{background:var(--ac-sidebar-bg);color:var(--ac-text-primary);}
 .modal-btn-pri{flex:1;padding:13px;background:rgba(var(--ac-accent-rgb),0.1);border:1px solid rgba(var(--ac-accent-rgb),0.28);border-radius:36px;color:var(--ac-accent);font-family:'Inter Tight',sans-serif;font-size:9px;letter-spacing:2px;text-transform:uppercase;cursor:pointer;transition:all .2s;}
 .modal-btn-pri:hover{background:rgba(var(--ac-accent-rgb),0.2);}
 .modal-btn-sec{padding:13px 20px;background:transparent;border:1px solid var(--ac-card-border);border-radius:36px;color:var(--ac-text-tertiary);font-family:'Inter Tight',sans-serif;font-size:9px;letter-spacing:2px;text-transform:uppercase;cursor:pointer;transition:all .2s;}
@@ -5212,8 +5240,8 @@ function renderDashboard() {
 
   // ── KPIs ──
   const mensal  = STATE.consultas.filter(c => c.data?.startsWith(thisMonth));
-  const realiz  = mensal.filter(c => c.status === 'realizado').length;
-  const agend   = mensal.filter(c => ['agendado','confirmado'].includes(c.status)).length;
+  const realiz  = mensal.filter(c => c.status === 'confirmado').length;
+  const agend   = mensal.filter(c => c.status === 'pendente').length;
   const canc    = mensal.filter(c => c.status === 'cancelado').length;
   const totalMes = mensal.length || 1;
   const taxa    = Math.round((realiz / totalMes) * 100);
@@ -5265,8 +5293,8 @@ function renderDashboard() {
   if (statusEl) {
     const maxS = Math.max(realiz, agend, canc, 1);
     const statusData = [
-      {label:'Realizadas', val:realiz, color:'rgba(52,211,153,0.85)',  icon:'✅'},
-      {label:'Agendadas',  val:agend,  color:'rgba(var(--ac-accent-rgb),0.8)', icon:'📅'},
+      {label:'Confirmadas', val:realiz, color:'rgba(52,211,153,0.85)',  icon:'✅'},
+      {label:'Pendentes',   val:agend,  color:'rgba(var(--ac-accent-rgb),0.8)', icon:'📅'},
       {label:'Canceladas', val:canc,   color:'rgba(239,68,68,0.75)',   icon:'❌'},
     ];
     statusEl.innerHTML = statusData.map(s => {
@@ -5319,7 +5347,7 @@ function renderDashboard() {
 
   // ── Top procedimentos ──
   const procCount = {};
-  STATE.consultas.filter(c => c.status === 'realizado').forEach(c => {
+  STATE.consultas.filter(c => c.status === 'confirmado').forEach(c => {
     const p = c.procedimento||'Consulta';
     procCount[p] = (procCount[p]||0) + 1;
   });
@@ -5379,7 +5407,7 @@ function renderDashboard() {
 
   // ── Próximas consultas ──
   const proximas = STATE.consultas
-    .filter(c => c.data >= hojeISO && ['agendado','confirmado'].includes(c.status))
+    .filter(c => c.data >= hojeISO && ['pendente','confirmado'].includes(c.status))
     .sort((a,b) => (a.data+a.hora).localeCompare(b.data+b.hora))
     .slice(0,5);
   const proxEl = document.getElementById('dashProximas');
@@ -5650,7 +5678,6 @@ function applyTheme(theme) {
 
 
   if (theme === 'light') {
-    if (icon) icon.textContent = '🌙';
     // Forçar background light via CSS var e body
     document.body.style.background = '#F4F6FA';
     const ls = document.getElementById('loginScreen');
@@ -5660,7 +5687,6 @@ function applyTheme(theme) {
     document.documentElement.style.setProperty('--ac-accent-rgb', '21,101,192');
     document.documentElement.style.setProperty('--ac-bg', '#F4F6FA');
   } else {
-    if (icon) icon.textContent = '☀️';
     // Restaurar dark
     const bgPreset = BG_PRESETS[STATE.bgKey] || BG_PRESETS.navy;
     document.body.style.background = bgPreset.bg;
@@ -6191,7 +6217,7 @@ function editConsulta(id) {
   document.getElementById('fConsultaData').value   = s.data;
   document.getElementById('fConsultaHora').value   = s.hora;
   document.getElementById('fConsultaProc').value   = s.procedimento || '';
-  document.getElementById('fConsultaStatus').value = s.status || 'agendada';
+  document.getElementById('fConsultaStatus').value = s.status || 'pendente';
   const doutorSel = document.getElementById('fConsultaDoutor');
   if (doutorSel) doutorSel.value = s.doutor_id || '';
   const btn = card.querySelector('.modal-btn-pri');
