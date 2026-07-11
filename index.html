@@ -2248,6 +2248,131 @@ const _auth = firebase.auth();
 const _fsdb = firebase.firestore();
 </script>
 
+<script>
+/* ════════════════════════════════════════════════════════════
+   ARiA — Logger estruturado do front-end
+   ════════════════════════════════════════════════════════════
+   Objetivo: substituir os console.log/console.error soltos (sem
+   contexto, sem nível, sem sanitização) por um logger único que:
+
+     1. Sempre emite JSON estruturado no console do navegador
+        (nível, timestamp, requestId, userId, action, mensagem) —
+        em vez de string livre tipo console.error('erro:', e).
+     2. Sanitiza qualquer token/senha/dado pessoal ANTES de imprimir
+        — mesmo no console do navegador, porque extensões maliciosas,
+        gravações de tela de suporte, ou "inspecionar elemento" de
+        alguém "ajudando" o usuário podem vazar esses dados.
+     3. Mantém um buffer em memória dos últimos logs (sanitizados)
+        para poder anexar num print de erro / relatório de bug, sem
+        nunca persistir nada sensível em localStorage.
+
+   Por que não Winston/Pino aqui? Ambos são bibliotecas de Node.js
+   (dependem de `process`, `stream`, `fs`) e não rodam no browser.
+   Este módulo replica a mesma API (log.info/warn/error/fatal,
+   log.child(contexto)) só que compatível com o runtime do navegador.
+════════════════════════════════════════════════════════════ */
+const _ariaLogger = (function () {
+  const FULL_REDACT_KEYS = new Set([
+    'password', 'senha', 'pass', 'pwd',
+    'token', 'idtoken', 'id_token', 'accesstoken', 'access_token',
+    'apikey', 'api_key', 'authorization', 'service_role', 'secret',
+  ]);
+  const PARTIAL_MASK_KEYS = new Set([
+    'email', 'telefone', 'phone', 'celular', 'whatsapp', 'cpf', 'nome',
+  ]);
+
+  function maskString(value) {
+    if (typeof value !== 'string' || !value.length) return value;
+    if (value.includes('@')) {
+      const [user, domain] = value.split('@');
+      return `${user.slice(0, 2)}***@${domain}`;
+    }
+    if (value.length <= 4) return '*'.repeat(value.length);
+    return `${value.slice(0, 2)}${'*'.repeat(Math.max(value.length - 4, 3))}${value.slice(-2)}`;
+  }
+
+  function sanitize(value, depth) {
+    depth = depth || 0;
+    if (depth > 6 || value === null || value === undefined) return value;
+    if (Array.isArray(value)) return value.slice(0, 50).map(v => sanitize(v, depth + 1));
+    if (value instanceof Error) return { name: value.name, message: value.message, stack: value.stack };
+    if (typeof value === 'object') {
+      const out = {};
+      for (const k of Object.keys(value)) {
+        const key = k.toLowerCase();
+        if (FULL_REDACT_KEYS.has(key)) out[k] = '[REDACTED]';
+        else if (PARTIAL_MASK_KEYS.has(key) && typeof value[k] === 'string') out[k] = maskString(value[k]);
+        else out[k] = sanitize(value[k], depth + 1);
+      }
+      return out;
+    }
+    return value;
+  }
+
+  const LEVELS = { debug: 10, info: 20, warn: 30, error: 40, fatal: 50 };
+  const _buffer = []; // últimos logs sanitizados, só em memória (não persiste)
+  const BUFFER_MAX = 200;
+
+  function create(baseContext) {
+    baseContext = baseContext || {};
+    function write(level, message, meta) {
+      const entry = Object.assign(
+        { timestamp: new Date().toISOString(), level, message },
+        sanitize(baseContext),
+        sanitize(meta || {})
+      );
+      _buffer.push(entry);
+      if (_buffer.length > BUFFER_MAX) _buffer.shift();
+
+      const line = JSON.stringify(entry);
+      if (level === 'error' || level === 'fatal') console.error(line);
+      else if (level === 'warn') console.warn(line);
+      else console.log(line);
+    }
+    return {
+      debug: (m, meta) => write('debug', m, meta),
+      info: (m, meta) => write('info', m, meta),
+      warn: (m, meta) => write('warn', m, meta),
+      error: (m, meta) => write('error', m, meta),
+      fatal: (m, meta) => write('fatal', m, meta),
+      child: (extra) => create(Object.assign({}, baseContext, extra)),
+    };
+  }
+
+  return {
+    create,
+    getBuffer: () => _buffer.slice(), // já vem sanitizado — seguro pra anexar num bug report
+  };
+})();
+
+// Logger raiz da aplicação — cada ação relevante deve criar um child
+// com { action: '...' } e, quando já souber o uid, { userId: uid }.
+let _log = _ariaLogger.create({ app: 'aria-odonto-frontend' });
+
+/* ════════════════════════════════════════════════════════════
+   ARiA — Sanitização de saída (proteção contra XSS armazenado)
+   ════════════════════════════════════════════════════════════
+   O app usa `innerHTML` com template literals em várias telas para
+   montar a UI a partir de dados de paciente/consulta/financeiro
+   (nome, observações, descrição). Se um desses campos contiver HTML
+   (ex: um nome de paciente cadastrado como `<img src=x onerror=...>`),
+   ele executava como código no navegador de quem abrisse aquele
+   registro — inclusive o próprio dentista, e potencialmente expondo
+   o token de sessão dele.
+
+   `escapeHtml()` deve envolver TODO valor vindo de dado do usuário
+   (nome, telefone, observação, descrição, etc.) antes de entrar num
+   template literal usado com `innerHTML`. Texto literal do próprio
+   app (labels, ícones fixos) não precisa.
+════════════════════════════════════════════════════════════ */
+function escapeHtml(value) {
+  if (value === null || value === undefined) return '';
+  const str = String(value);
+  const map = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;', '/': '&#x2F;' };
+  return str.replace(/[&<>"'/]/g, ch => map[ch]);
+}
+</script>
+
 <!-- ══ LOGIN SCREEN ══ -->
 <div id="loginScreen">
   <canvas id="loginCanvas" width="160" height="160"></canvas>
@@ -2274,6 +2399,9 @@ const _fsdb = firebase.firestore();
       <span class="lg-label">Senha</span>
       <input id="lgPass" class="lg-input" type="password" placeholder="••••••••">
     </div>
+    <div id="lgForgotWrap" style="text-align:right;margin-top:-6px;">
+      <span onclick="lgForgotPassword()" style="font-family:'Inter Tight',sans-serif;font-size:9px;letter-spacing:.4px;color:var(--ac-accent);opacity:.75;cursor:pointer;text-decoration:underline;">Esqueci minha senha</span>
+    </div>
     <div id="lgTermsWrap" style="display:none;">
       <label style="display:flex;align-items:flex-start;gap:8px;cursor:pointer;">
         <input type="checkbox" id="lgTermsCheck" style="margin-top:3px;accent-color:var(--ac-accent);flex-shrink:0;" onchange="lgTermsToggle()">
@@ -2285,6 +2413,26 @@ const _fsdb = firebase.firestore();
     <div id="lgError"></div>
     <button class="lg-btn" id="lgBtn" onclick="lgAuth()">Entrar</button>
     <span onclick="openPrivacy()" style="text-align:center;font-family:'Inter Tight',sans-serif;font-size:7px;letter-spacing:1px;color:rgba(255,255,255,.15);cursor:pointer;text-decoration:underline;">Política de Privacidade · LGPD</span>
+  </div>
+</div>
+
+<!-- ══ TELA DE VERIFICAÇÃO DE E-MAIL ══
+     Exigida antes de liberar acesso ao app — reduz cadastro de contas
+     falsas/descartáveis com e-mail que não existe, e garante que o
+     dentista tem acesso real àquele e-mail (importante pro fluxo de
+     "esqueci minha senha" funcionar de verdade). -->
+<div id="verifyEmailScreen" style="display:none;position:fixed;inset:0;z-index:9999;background:#05070d;align-items:center;justify-content:center;padding:24px;">
+  <div style="max-width:380px;width:100%;background:rgba(10,16,28,.9);border:1px solid rgba(96,165,250,.18);border-radius:20px;padding:32px 28px;text-align:center;">
+    <div style="font-size:32px;margin-bottom:12px;">📧</div>
+    <div style="font-family:'Inter Tight',sans-serif;font-weight:600;font-size:16px;color:#fff;margin-bottom:8px;">Confirme seu e-mail</div>
+    <div style="font-family:'Inter Tight',sans-serif;font-size:12px;color:rgba(255,255,255,.55);line-height:1.6;margin-bottom:6px;">
+      Enviamos um link de confirmação para<br><strong id="verifyEmailAddr" style="color:rgba(255,255,255,.85);"></strong>.
+      Clique no link e depois volte aqui.
+    </div>
+    <div id="verifyEmailMsg" style="font-family:'Inter Tight',sans-serif;font-size:11px;margin:14px 0;min-height:16px;"></div>
+    <button class="lg-btn" onclick="verifyEmailCheckNow()" style="margin-bottom:10px;">Já confirmei, continuar</button>
+    <div onclick="verifyEmailResend()" style="font-family:'Inter Tight',sans-serif;font-size:10px;color:var(--ac-accent);opacity:.8;cursor:pointer;text-decoration:underline;margin-bottom:14px;">Reenviar e-mail de confirmação</div>
+    <div onclick="_auth.signOut()" style="font-family:'Inter Tight',sans-serif;font-size:10px;color:rgba(255,255,255,.3);cursor:pointer;text-decoration:underline;">Sair e usar outra conta</div>
   </div>
 </div>
 
@@ -2481,6 +2629,10 @@ const _fsdb = firebase.firestore();
       <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/><path d="M12 11v4M10 13h4"/></svg>
       Doutores
       <span class="ac-sb-badge" id="sbBadgeDoc">0</span>
+    </div>
+    <div class="ac-sb-item" id="navConvenios" onclick="navTo('convenios')">
+      <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><circle cx="12" cy="8" r="6"/><polyline points="8.21 13.89 7 22 12 19 17 22 15.79 13.88"/></svg>
+      Convênios
     </div>
     <div class="ac-sb-item" id="navAgenda" onclick="navTo('agenda')">
       <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></svg>
@@ -2836,6 +2988,21 @@ const _fsdb = firebase.firestore();
     </div>
   </div>
 
+  <!-- ── VIEW: CONVÊNIOS ── -->
+  <div id="viewConvenios" class="ac-view">
+    <div class="ac-view-header">
+      <div class="ac-view-title">Convênios</div>
+      <button class="ac-add-btn" onclick="openModal('addConvenio')">+ Novo</button>
+    </div>
+    <div class="ac-search-bar">
+      <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4.35-4.35"/></svg>
+      <input type="text" placeholder="Buscar convênio..." id="searchConvenio" oninput="renderConvenios()" autocomplete="off">
+    </div>
+    <div class="ac-list pac-list" id="listaConvenios" style="max-width:640px;">
+      <div class="ac-empty">Nenhum convênio cadastrado.<br>Clique em + Novo para adicionar.</div>
+    </div>
+  </div>
+
   <!-- ── VIEW: AGENDA ── -->
   <div id="viewAgenda" class="ac-view ac-view-agenda">
     <div class="ag-layout">
@@ -3091,6 +3258,24 @@ const _fsdb = firebase.firestore();
           <div class="fin-resumo-card"><div class="fin-resumo-val" id="fgTotal">R$ 0,00</div><div class="fin-resumo-label">Total</div></div>
           <div class="fin-resumo-card"><div class="fin-resumo-val pago" id="fgPago">R$ 0,00</div><div class="fin-resumo-label">Recebido</div></div>
           <div class="fin-resumo-card"><div class="fin-resumo-val pendente" id="fgPendente">R$ 0,00</div><div class="fin-resumo-label">Pendente</div></div>
+        </div>
+        <!-- Meta do mês -->
+        <div id="metaMesCard" style="background:var(--ac-card-bg,rgba(255,255,255,.03));border:1px solid var(--ac-border,rgba(255,255,255,.08));border-radius:12px;padding:12px 14px;margin-bottom:10px;">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;">
+            <span style="font-family:'Syne',sans-serif;font-size:12px;font-weight:600;color:var(--ac-text-secondary,rgba(255,255,255,.6));">🎯 Meta do mês</span>
+            <span onclick="abrirEdicaoMeta()" style="cursor:pointer;font-size:11px;color:var(--ac-accent);text-decoration:underline;">editar</span>
+          </div>
+          <div id="metaMesSemValor" style="display:none;font-size:11px;color:var(--ac-text-tertiary,rgba(255,255,255,.4));">Nenhuma meta definida para este mês. Clique em "editar" para começar.</div>
+          <div id="metaMesComValor">
+            <div style="display:flex;justify-content:space-between;font-size:11px;margin-bottom:5px;">
+              <span id="metaMesRecebido" style="color:rgba(52,211,153,.95);font-weight:600;">R$ 0,00</span>
+              <span id="metaMesAlvo" style="color:var(--ac-text-tertiary,rgba(255,255,255,.45));">de R$ 0,00</span>
+            </div>
+            <div style="height:7px;border-radius:4px;background:rgba(255,255,255,.08);overflow:hidden;">
+              <div id="metaMesBarra" style="height:100%;width:0%;background:linear-gradient(90deg,rgba(92,141,239,.9),rgba(52,211,153,.9));border-radius:4px;transition:width .4s;"></div>
+            </div>
+            <div id="metaMesPct" style="font-size:10px;color:var(--ac-text-tertiary,rgba(255,255,255,.4));margin-top:4px;text-align:right;">0%</div>
+          </div>
         </div>
         <div class="fin-filters">
           <select class="fin-field" id="finFiltroStatus" onchange="renderFinanceiro()" style="flex:1;">
@@ -3359,6 +3544,10 @@ const _fsdb = firebase.firestore();
     <input type="tel" class="modal-field" id="fPacTel" placeholder="(11) 99999-9999">
     <label class="modal-label">Data de nascimento</label>
     <input type="date" class="modal-field" id="fPacNasc">
+    <label class="modal-label">Convênio</label>
+    <select class="modal-field" id="fPacConvenio">
+      <option value="">Particular (sem convênio)</option>
+    </select>
     <label class="modal-label">Observações / comorbidades</label>
     <input type="text" class="modal-field" id="fPacObs" placeholder="Hipertensão, alergia a penicilina...">
     <label class="modal-label">Status</label>
@@ -3440,6 +3629,23 @@ const _fsdb = firebase.firestore();
     <div class="modal-actions">
       <button class="modal-btn-sec" onclick="closeModal()">Cancelar</button>
       <button class="modal-btn-pri" onclick="saveDoutor()">Salvar</button>
+    </div>
+  </div>
+
+  <!-- ADD CONVÊNIO -->
+  <div class="modal-card" id="modalAddConvenio" style="display:none;">
+    <div class="modal-title" id="convenioModalTitle">Novo Convênio</div>
+    <input type="hidden" id="fConvenioId">
+    <label class="modal-label">Nome do convênio *</label>
+    <input type="text" class="modal-field" id="fConvenioNome" placeholder="Ex: Bradesco Dental, Amil, Particular...">
+    <label class="modal-label">Status</label>
+    <select class="modal-field" id="fConvenioStatus">
+      <option value="true">Ativo</option>
+      <option value="false">Inativo</option>
+    </select>
+    <div class="modal-actions">
+      <button class="modal-btn-sec" onclick="closeModal()">Cancelar</button>
+      <button class="modal-btn-pri" id="convenioModalSaveBtn" onclick="saveConvenio()">Salvar</button>
     </div>
   </div>
 
@@ -3536,11 +3742,25 @@ const CONFIG = {
 ════════════════════════════════════════════ */
 async function _ariaAuthToken() {
   if (!_auth || !_auth.currentUser) return null;
-  try { return await _auth.currentUser.getIdToken(); } catch (_) { return null; }
+  try {
+    return await _auth.currentUser.getIdToken();
+  } catch (err) {
+    // Antes: catch(_) { return null } — indistinguível de "usuário não
+    // logado". Agora fica registrado que HOUVE uma tentativa de pegar o
+    // token e ela falhou (ex: sessão do Firebase corrompida/expirada).
+    _log.warn('Falha ao obter ID token do Firebase', { userId: _auth.currentUser.uid, error: err });
+    return null;
+  }
 }
 
 async function _ariaApiCall(body) {
+  // Cada chamada ganha seu próprio requestId, correlacionável com o
+  // "x-request-id" que o backend devolve no header da resposta — dá
+  // pra achar exatamente essa requisição nos logs do Cloudflare.
+  const requestId = (crypto.randomUUID && crypto.randomUUID()) || String(Date.now()) + Math.random();
+  const log = _log.child({ requestId, action: body.action, userId: _currentUid || undefined });
   const idToken = await _ariaAuthToken();
+
   let res;
   try {
     res = await fetch('/api', {
@@ -3549,11 +3769,26 @@ async function _ariaApiCall(body) {
       body: JSON.stringify({ ...body, idToken }),
     });
   } catch (networkErr) {
+    // Antes: falha de rede virava só uma string pro usuário, sem log
+    // nenhum — impossível saber depois se foi 1 usuário ou 500.
+    log.error('Falha de rede ao chamar /api', { error: networkErr });
     return { error: _isLocalDevHost() ? _LOCAL_DEV_API_HINT : 'Falha de rede ao falar com o servidor' };
   }
-  return res.json().catch(() => ({
-    error: _isLocalDevHost() ? _LOCAL_DEV_API_HINT : 'Resposta inválida do servidor',
-  }));
+
+  const serverRequestId = res.headers && res.headers.get ? res.headers.get('x-request-id') : null;
+  if (!res.ok) {
+    // warn (não error): a maioria dos !res.ok são erros esperados de
+    // negócio (403 tabela não permitida, 401 não autenticado etc.),
+    // não bugs — mas ainda queremos rastro pra diagnosticar picos.
+    log.warn('/api respondeu com erro HTTP', { httpStatus: res.status, serverRequestId });
+  }
+
+  return res.json().catch((parseErr) => {
+    // Antes: catch(() => ({...})) — uma resposta corrompida ou página de
+    // erro HTML do Cloudflare virava uma mensagem genérica sem log.
+    log.error('Resposta de /api não é JSON válido', { httpStatus: res.status, serverRequestId, error: parseErr });
+    return { error: _isLocalDevHost() ? _LOCAL_DEV_API_HINT : 'Resposta inválida do servidor' };
+  });
 }
 
 // Detecta se está rodando num servidor estático local (localhost, 127.0.0.1,
@@ -3672,6 +3907,8 @@ let STATE = {
   consultas: [],
   prontuarios: [],
   doutores: [],
+  convenios: [],
+  metaMesValor: 0,
   currentFilter: 'todos',
   selectedPacId: null,
   agendaDate: new Date(),
@@ -3715,7 +3952,7 @@ window.addEventListener('DOMContentLoaded', async () => {
       renderDashWidgetList();
       applyDashWidgets();
     } catch(e) {
-      console.error('[ARiA] dashWidgets boot error:', e);
+      _log.error('Falha ao montar widgets do dashboard no boot', { error: e });
       if (typeof showToast === 'function') showToast('Erro painel inicial: ' + (e.message || e));
     }
   }, 0);
@@ -3725,26 +3962,67 @@ window.addEventListener('DOMContentLoaded', async () => {
    SUPABASE — LOAD
 ════════════════════════════════════════════ */
 async function loadAll() {
+  const log = _log.child({ action: 'loadAll', userId: _currentUid || undefined });
   try {
-    const [pac, cons, pront, fin, doc] = await Promise.all([
+    const mesAtual = _mesAtualISO();
+    const [pac, cons, pront, fin, doc, conv, meta] = await Promise.all([
       db.from('odonto_pacientes').select('*').eq('user_id', _currentUid).order('nome').limit(500),
       db.from('odonto_consultas').select('*').eq('user_id', _currentUid).order('data,hora').limit(1000),
       db.from('odonto_prontuarios').select('*').eq('user_id', _currentUid).order('data', {ascending:false}).limit(500),
       db.from('odonto_financeiro').select('*').eq('user_id', _currentUid).order('criado_em', {ascending:false}).limit(500),
       db.from('odonto_doutores').select('*').eq('user_id', _currentUid).order('nome').limit(200),
+      db.from('odonto_convenios').select('*').eq('user_id', _currentUid).order('nome').limit(200),
+      db.from('odonto_metas').select('*').eq('user_id', _currentUid).eq('mes', mesAtual).limit(1),
     ]);
+
+    // IMPORTANTE: _ariaApiCall/_exec() NUNCA lança exceção — erro de rede
+    // ou do banco sempre volta como { data: null, error: {...} }, nunca
+    // como Promise rejeitada. Isso significa que o try/catch deste bloco
+    // não pega essas falhas. Antes, isso fazia STATE.pacientes = pac.data
+    // || [] silenciosamente virar uma lista VAZIA quando na verdade tinha
+    // dado um erro de banco — o usuário via "nenhum paciente cadastrado"
+    // ao invés de um aviso de falha. Verificamos cada resultado aqui.
+    const results = { pacientes: pac, consultas: cons, prontuarios: pront, financeiro: fin, doutores: doc, convenios: conv, metas: meta };
+    let anyError = false;
+    for (const [nome, r] of Object.entries(results)) {
+      if (r && r.error) {
+        anyError = true;
+        log.error('Falha ao carregar dados do Supabase', { entidade: nome, error: r.error });
+      }
+    }
+
     STATE.pacientes   = pac.data   || [];
     STATE.consultas   = cons.data  || [];
     STATE.prontuarios = pront.data || [];
     STATE.financeiro  = fin.data   || [];
     STATE.doutores    = doc.data   || [];
+    STATE.convenios   = conv.data  || [];
+    STATE.metaMesValor = (meta.data && meta.data[0]) ? Number(meta.data[0].valor_meta || 0) : 0;
     renderPacientes();
     renderAgenda();
     renderProntuarios();
     renderDoutores();
     renderStats();
     renderDashboard();
-  } catch(e) { console.error('Erro ao carregar Supabase:', e); loadFromLocal(); }
+    renderMetaCard();
+
+    if (anyError && typeof showToast === 'function') {
+      // Antes o usuário não tinha NENHUM sinal visual de que os dados
+      // podem estar incompletos/desatualizados por causa de um erro.
+      showToast('Alguns dados podem não ter sido carregados. Veja o console ou tente novamente.');
+    }
+  } catch(e) {
+    // Continua existindo para exceções de fato (ex: erro de programação,
+    // Promise.all rejeitando por um throw síncrono inesperado).
+    log.fatal('Exceção inesperada ao carregar dados', { error: e });
+    loadFromLocal();
+  }
+}
+
+/* Retorna o mês atual no formato 'YYYY-MM', usado como chave da meta financeira */
+function _mesAtualISO(){
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`;
 }
 
 /* ════════════════════════════════════════════
@@ -3829,7 +4107,13 @@ function odAriaInit() {
     _odApp.reset();
     const saved = localStorage.getItem(_lsKey('od_' + _odPacId));
     if (saved) {
-      try { _odApp.setData(JSON.parse(saved)); } catch(e) {}
+      try { _odApp.setData(JSON.parse(saved)); } catch(e) {
+        // Antes: catch(e){} — dado clínico (odontograma) corrompido
+        // no localStorage virava silenciosamente um odontograma em
+        // branco, sem nenhum aviso de que o dado salvo existia mas
+        // não pôde ser lido.
+        _log.error('Falha ao carregar odontograma salvo (dado local corrompido?)', { pacienteId: _odPacId, error: e });
+      }
     }
   }
 }
@@ -4244,7 +4528,13 @@ function odOnSelectPac() {
   _odApp.reset();
   const saved = localStorage.getItem(_lsKey('od_' + odPacId));
   if (saved) {
-    try { _odApp.setData(JSON.parse(saved)); } catch(e) {}
+    try { _odApp.setData(JSON.parse(saved)); } catch(e) {
+        // Antes: catch(e){} — dado clínico (odontograma) corrompido
+        // no localStorage virava silenciosamente um odontograma em
+        // branco, sem nenhum aviso de que o dado salvo existia mas
+        // não pôde ser lido.
+        _log.error('Falha ao carregar odontograma salvo (dado local corrompido?)', { pacienteId: _odPacId, error: e });
+      }
   }
   _odLoadingPac = false;
 }
@@ -4360,12 +4650,12 @@ function renderPacientes(list) {
     const ini = (p.nome||'?').split(' ').map(w=>w[0]).slice(0,2).join('').toUpperCase();
     const isSel = String(p.id) === String(selectedId);
     return `<div class="pac-card ${isSel?'is-selected':''}" data-pid="${p.id}" data-testid="pac-card-${p.id}" onclick="selectPaciente('${p.id}')">
-      <div class="pac-avatar">${ini}</div>
+      <div class="pac-avatar">${escapeHtml(ini)}</div>
       <div class="pac-info">
-        <div class="pac-name">${p.nome}</div>
-        <div class="pac-meta">${p.telefone||'Sem telefone'} · ${calcIdade(p.data_nasc)}</div>
+        <div class="pac-name">${escapeHtml(p.nome)}</div>
+        <div class="pac-meta">${escapeHtml(p.telefone)||'Sem telefone'} · ${calcIdade(p.data_nasc)}</div>
       </div>
-      <span class="pac-badge ${p.status||'ativo'}">${p.status||'ativo'}</span>
+      <span class="pac-badge ${p.status||'ativo'}">${escapeHtml(p.status||'ativo')}</span>
     </div>`;
   }).join('');
 
@@ -4462,8 +4752,10 @@ function renderPacienteDetail(id) {
   const idade = calcIdade(p.data_nasc);
   const aniv = _diasParaAniversario(p.data_nasc);
   const metaParts = [];
-  if (p.telefone) metaParts.push(`📱 ${p.telefone}`);
+  if (p.telefone) metaParts.push(`📱 ${escapeHtml(p.telefone)}`);
   metaParts.push(`🎂 ${idade}`);
+  const convenio = (STATE.convenios||[]).find(c => String(c.id) === String(p.convenio_id));
+  metaParts.push(convenio ? `🏥 ${escapeHtml(convenio.nome)}` : '🏥 Particular');
   if (aniv !== null) {
     if (aniv === 0) metaParts.push('🎉 Aniversário hoje!');
     else if (aniv <= 30) metaParts.push(`🎈 Faz aniversário em ${aniv} dia${aniv>1?'s':''}`);
@@ -4558,18 +4850,18 @@ function _rowConsulta(c){
   return `<div class="pac-row" style="--row-rgb:${rgb};" onclick="editConsulta('${c.id}')">
     <div class="pac-row-date">${_fmtBR(c.data)}<br><span style="color:var(--ac-accent);">${(c.hora||'').slice(0,5)}</span></div>
     <div class="pac-row-main">
-      <div class="pac-row-title">${c.procedimento||'Consulta'}</div>
-      <div class="pac-row-sub">${doc?.nome ? 'com '+doc.nome : 'Sem doutor vinculado'}</div>
+      <div class="pac-row-title">${escapeHtml(c.procedimento||'Consulta')}</div>
+      <div class="pac-row-sub">${doc?.nome ? 'com '+escapeHtml(doc.nome) : 'Sem doutor vinculado'}</div>
     </div>
-    <span class="pac-row-badge ${c.status||'pendente'}">${c.status||'pendente'}</span>
+    <span class="pac-row-badge ${c.status||'pendente'}">${escapeHtml(c.status||'pendente')}</span>
   </div>`;
 }
 function _rowPront(pr){
   return `<div class="pac-row" style="--row-rgb:167,139,250;" onclick="editProntuario && editProntuario('${pr.id}')">
     <div class="pac-row-date">${_fmtBR(pr.data)}</div>
     <div class="pac-row-main">
-      <div class="pac-row-title">${pr.procedimento||'Prontuário'}</div>
-      <div class="pac-row-sub">${(pr.notas||pr.observacoes||'').slice(0,80) || '—'}</div>
+      <div class="pac-row-title">${escapeHtml(pr.procedimento||'Prontuário')}</div>
+      <div class="pac-row-sub">${escapeHtml((pr.notas||pr.observacoes||'').slice(0,80)) || '—'}</div>
     </div>
   </div>`;
 }
@@ -4580,10 +4872,10 @@ function _rowFin(f){
   return `<div class="pac-row" style="--row-rgb:${rgb};" onclick="editFinanceiro && editFinanceiro('${f.id}')">
     <div class="pac-row-date">${_fmtBR(f.criado_em || f.data)}</div>
     <div class="pac-row-main">
-      <div class="pac-row-title">${f.descricao||'Item financeiro'}</div>
+      <div class="pac-row-title">${escapeHtml(f.descricao||'Item financeiro')}</div>
       <div class="pac-row-sub">${_fmtMoney(f.valor)}</div>
     </div>
-    <span class="pac-row-badge ${f.status||'orcado'}">${f.status||'orcado'}</span>
+    <span class="pac-row-badge ${f.status||'orcado'}">${escapeHtml(f.status||'orcado')}</span>
   </div>`;
 }
 
@@ -4642,7 +4934,7 @@ function renderAgenda() {
 
   if (!exibir.length) {
     el.innerHTML = '<div class="ac-empty">Nenhuma consulta para este dia.<br>Clique em + Agendar.</div>';
-    try { renderWeekCalendar(); } catch(e) { console.warn('weekCal', e); }
+    try { renderWeekCalendar(); } catch(e) { _log.warn('Falha ao renderizar calendário semanal', { error: e }); }
     return;
   }
 
@@ -4655,10 +4947,10 @@ function renderAgenda() {
     div.innerHTML = `
       <div class="agenda-time">${s.hora?.slice(0,5)||'--:--'}</div>
       <div class="agenda-info">
-        <div class="agenda-pac">${pac?.nome||'Paciente removido'}</div>
-        <div class="agenda-proc">${s.procedimento||'Consulta'}${doc ? ' · <span style="color:var(--ac-accent);opacity:.8;">'+doc.nome+'</span>' : ''}</div>
+        <div class="agenda-pac">${escapeHtml(pac?.nome||'Paciente removido')}</div>
+        <div class="agenda-proc">${escapeHtml(s.procedimento||'Consulta')}${doc ? ' · <span style="color:var(--ac-accent);opacity:.8;">'+escapeHtml(doc.nome)+'</span>' : ''}</div>
       </div>
-      <span class="agenda-status ${s.status||'pendente'}">${s.status||'pendente'}</span>
+      <span class="agenda-status ${s.status||'pendente'}">${escapeHtml(s.status||'pendente')}</span>
       <div class="card-actions">
         <button class="card-btn edit" onclick="editConsulta('${s.id}')" title="Editar">
           <svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
@@ -4681,7 +4973,7 @@ function renderAgenda() {
   el.appendChild(frag);
 
   // Renderiza calendário semanal na coluna direita
-  try { renderWeekCalendar(); } catch(e) { console.warn('weekCal', e); }
+  try { renderWeekCalendar(); } catch(e) { _log.warn('Falha ao renderizar calendário semanal', { error: e }); }
 }
 
 /* ════════════════════════════════════════════
@@ -4841,8 +5133,8 @@ function renderWeekCalendar() {
     ev.onclick = (e) => { e.stopPropagation(); editConsulta(c.id); };
     ev.innerHTML = `
       <div class="agw-event-time">${(c.hora||'').slice(0,5)}</div>
-      <div class="agw-event-pac">${pac?.nome||'Paciente'}</div>
-      <div class="agw-event-proc">${c.procedimento||'Consulta'}</div>
+      <div class="agw-event-pac">${escapeHtml(pac?.nome||'Paciente')}</div>
+      <div class="agw-event-proc">${escapeHtml(c.procedimento||'Consulta')}</div>
     `;
     cols[idx]?.appendChild(ev);
   });
@@ -4869,7 +5161,7 @@ function renderWeekCalendar() {
     } else {
       legend.innerHTML = procs.slice(0,6).map(p => {
         const rgb = procColor(p);
-        return `<span class="agw-legend-item"><span class="agw-legend-dot" style="background:rgb(${rgb});"></span>${p}</span>`;
+        return `<span class="agw-legend-item"><span class="agw-legend-dot" style="background:rgb(${rgb});"></span>${escapeHtml(p)}</span>`;
       }).join('');
     }
   }
@@ -4951,10 +5243,10 @@ function renderProntuarios(list) {
     const initials = (pac?.nome||'P').split(' ').map(w=>w[0]).slice(0,2).join('').toUpperCase();
     const isSelected = String(p.id) === String(_selectedProntId);
     return `<div class="pac-card ${isSelected ? 'is-selected' : ''}" onclick="selectProntuario('${p.id}')">
-      <div class="pac-avatar">${initials}</div>
+      <div class="pac-avatar">${escapeHtml(initials)}</div>
       <div class="pac-info">
-        <div class="pac-name">${pac?.nome||'Paciente removido'}</div>
-        <div class="pac-meta">${p.procedimento||'—'} · ${fmtDateBR(p.data)}</div>
+        <div class="pac-name">${escapeHtml(pac?.nome||'Paciente removido')}</div>
+        <div class="pac-meta">${escapeHtml(p.procedimento||'—')} · ${fmtDateBR(p.data)}</div>
       </div>
     </div>`;
   }).join('');
@@ -4979,8 +5271,8 @@ function selectProntuario(id) {
   document.getElementById('prontHeroDate').textContent = fmtDateBR(p.data);
   document.getElementById('prontHeroMeta').textContent = p.procedimento || '—';
 
-  document.getElementById('prontProcBlock').innerHTML = `<div class="pac-obs">${p.procedimento||'—'}</div>`;
-  document.getElementById('prontDoutorBlock').innerHTML = `<div class="pac-obs">${doutor?.nome||'Não informado'}${doutor?.especialidade ? ' · '+doutor.especialidade : ''}</div>`;
+  document.getElementById('prontProcBlock').innerHTML = `<div class="pac-obs">${escapeHtml(p.procedimento||'—')}</div>`;
+  document.getElementById('prontDoutorBlock').innerHTML = `<div class="pac-obs">${escapeHtml(doutor?.nome||'Não informado')}${doutor?.especialidade ? ' · '+escapeHtml(doutor.especialidade) : ''}</div>`;
   document.getElementById('prontObsBlock').textContent = p.observacoes || 'Sem observações.';
 
   // Financeiro
@@ -4999,9 +5291,9 @@ function selectProntuario(id) {
   document.getElementById('prontFinLista').innerHTML = finItems.length
     ? finItems.map(item => `<div class="pac-row" style="--row-rgb:92,141,239">
         <div class="pac-row-date">${item.data_item?fmtDateBR(item.data_item):'—'}</div>
-        <div class="pac-row-main"><div class="pac-row-title">${item.procedimento||'—'}</div><div class="pac-row-sub">${item.forma_pagamento?(formaLabel[item.forma_pagamento]||item.forma_pagamento):'—'}</div></div>
+        <div class="pac-row-main"><div class="pac-row-title">${escapeHtml(item.procedimento||'—')}</div><div class="pac-row-sub">${escapeHtml(item.forma_pagamento?(formaLabel[item.forma_pagamento]||item.forma_pagamento):'—')}</div></div>
         <div class="pac-row-right">R$ ${Number(item.valor||0).toFixed(2).replace('.',',')}</div>
-        <span class="pac-row-badge ${finBadge(item.status)}">${(item.status||'orçado').toUpperCase()}</span>
+        <span class="pac-row-badge ${finBadge(item.status)}">${escapeHtml((item.status||'orçado').toUpperCase())}</span>
       </div>`).join('')
     : '<div class="pac-empty-row">Nenhum item financeiro vinculado.</div>';
 
@@ -5211,6 +5503,171 @@ function exportProntuarioPDF(id) {
   showToast('PDF exportado com sucesso!');
 }
 
+/* Gera um recibo em PDF para um item financeiro já marcado como "pago" */
+function gerarReciboPDF(itemId) {
+  const item = (STATE.financeiro || []).find(x => String(x.id) === String(itemId));
+  if (!item) { showToast('Item financeiro não encontrado'); return; }
+  if (item.status !== 'pago') { showToast('Só é possível gerar recibo de itens pagos'); return; }
+
+  const pac = STATE.pacientes.find(x => String(x.id) === String(item.paciente_id));
+  const clinicName = STATE.clinicName || CONFIG.CLINIC_NAME || 'ARiA Clínicas';
+  const formaLabel = {pix:'PIX',dinheiro:'Dinheiro',cartao_credito:'Cartão de Crédito',cartao_debito:'Cartão de Débito',convenio:'Convênio',parcelado:'Parcelado'};
+  const valor = Number(item.valor||0);
+  const dataPagamento = item.data_item || item.criado_em || fmtDateISO(new Date());
+
+  const { jsPDF } = window.jspdf;
+  const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+  const pageW = doc.internal.pageSize.getWidth();
+  const margin = 20;
+  let y = 0;
+
+  // ── Header ──
+  doc.setFillColor(26, 82, 145);
+  doc.rect(0, 0, pageW, 26, 'F');
+  doc.setTextColor(255, 255, 255);
+  doc.setFontSize(15);
+  doc.setFont('helvetica', 'bold');
+  doc.text('RECIBO DE PAGAMENTO', margin, 11);
+  doc.setFontSize(8);
+  doc.setFont('helvetica', 'normal');
+  doc.text(clinicName.toUpperCase(), margin, 18);
+  const now = new Date();
+  doc.text(`Emitido em ${now.toLocaleDateString('pt-BR')}`, pageW - margin, 18, { align: 'right' });
+
+  y = 44;
+
+  // ── Valor em destaque ──
+  doc.setFillColor(240, 250, 245);
+  doc.roundedRect(margin, y, pageW - margin*2, 26, 3, 3, 'F');
+  doc.setDrawColor(180, 225, 205);
+  doc.roundedRect(margin, y, pageW - margin*2, 26, 3, 3, 'S');
+  doc.setTextColor(20, 130, 90);
+  doc.setFontSize(9);
+  doc.setFont('helvetica', 'bold');
+  doc.text('VALOR RECEBIDO', margin + 8, y + 10);
+  doc.setFontSize(20);
+  doc.text(`R$ ${valor.toFixed(2).replace('.',',')}`, margin + 8, y + 20);
+  y += 36;
+
+  // ── Corpo do texto do recibo ──
+  doc.setTextColor(30, 30, 30);
+  doc.setFontSize(11);
+  doc.setFont('helvetica', 'normal');
+  const nomePacTexto = pac?.nome || 'paciente não identificado';
+  const procTexto = item.procedimento || 'procedimento odontológico';
+  const dataTexto = fmtDateBR(dataPagamento.slice ? dataPagamento.slice(0,10) : dataPagamento);
+  const formaTexto = formaLabel[item.forma_pagamento] || item.forma_pagamento || 'não informada';
+
+  const corpo = `Recebemos de ${nomePacTexto} a quantia de R$ ${valor.toFixed(2).replace('.',',')} `
+    + `(${_valorPorExtenso(valor)}), referente a ${procTexto}, `
+    + `pago em ${dataTexto} via ${formaTexto}.`;
+  const corpoLines = doc.splitTextToSize(corpo, pageW - margin*2);
+  doc.text(corpoLines, margin, y);
+  y += corpoLines.length * 6 + 14;
+
+  // ── Detalhes em tabela pequena ──
+  doc.setDrawColor(210, 210, 210);
+  doc.line(margin, y, pageW - margin, y);
+  y += 8;
+
+  const rows = [
+    ['Paciente', nomePacTexto],
+    ['Procedimento', procTexto],
+    ['Data do pagamento', dataTexto],
+    ['Forma de pagamento', formaTexto],
+  ];
+  doc.setFontSize(9);
+  rows.forEach(([label, value]) => {
+    doc.setFont('helvetica', 'bold');
+    doc.setTextColor(80, 100, 130);
+    doc.text(label, margin, y);
+    doc.setFont('helvetica', 'normal');
+    doc.setTextColor(30, 30, 30);
+    doc.text(String(value), margin + 45, y);
+    y += 7;
+  });
+
+  y += 24;
+  // ── Assinatura ──
+  doc.setDrawColor(120, 120, 120);
+  doc.line(margin + 30, y, pageW - margin - 30, y);
+  doc.setFontSize(8.5);
+  doc.setTextColor(90, 90, 90);
+  doc.text(clinicName, pageW / 2, y + 6, { align: 'center' });
+
+  // ── Footer ──
+  const pageH = doc.internal.pageSize.getHeight();
+  doc.setFillColor(240, 244, 250);
+  doc.rect(0, pageH - 14, pageW, 14, 'F');
+  doc.setFontSize(7);
+  doc.setFont('helvetica', 'normal');
+  doc.setTextColor(120, 140, 165);
+  doc.text('Documento gerado pelo sistema ARiA Odonto · Uso exclusivo interno', pageW / 2, pageH - 6, { align: 'center' });
+
+  const nomeArquivo = nomePacTexto.replace(/\s+/g,'_').replace(/[^a-zA-Z0-9_]/g,'');
+  const dataArquivo = String(dataPagamento).slice(0,10).replace(/-/g,'');
+  doc.save(`recibo_${nomeArquivo}_${dataArquivo}.pdf`);
+  showToast('Recibo gerado com sucesso!');
+}
+
+/* Converte um valor em reais para texto por extenso em português,
+   como se escreve tradicionalmente em recibos ("cento e cinquenta
+   reais e trinta centavos"). Cobre de R$ 0,00 até R$ 999.999.999,99 —
+   mais que suficiente para qualquer procedimento odontológico. */
+function _valorPorExtenso(valor) {
+  const UNIDADES = ['','um','dois','três','quatro','cinco','seis','sete','oito','nove'];
+  const DEZ_A_DEZENOVE = ['dez','onze','doze','treze','catorze','quinze','dezesseis','dezessete','dezoito','dezenove'];
+  const DEZENAS = ['','dez','vinte','trinta','quarenta','cinquenta','sessenta','setenta','oitenta','noventa'];
+  const CENTENAS = ['','cento','duzentos','trezentos','quatrocentos','quinhentos','seiscentos','setecentos','oitocentos','novecentos'];
+
+  function trescentos(n) { // converte um número de 0 a 999
+    if (n === 0) return '';
+    if (n === 100) return 'cem';
+    const c = Math.floor(n / 100), r = n % 100;
+    const partes = [];
+    if (c > 0) partes.push(CENTENAS[c]);
+    if (r > 0) {
+      if (r < 10) partes.push(UNIDADES[r]);
+      else if (r < 20) partes.push(DEZ_A_DEZENOVE[r - 10]);
+      else {
+        const d = Math.floor(r / 10), u = r % 10;
+        partes.push(u > 0 ? `${DEZENAS[d]} e ${UNIDADES[u]}` : DEZENAS[d]);
+      }
+    }
+    return partes.join(' e ');
+  }
+
+  function inteiroPorExtenso(n) {
+    if (n === 0) return 'zero';
+    const milhoes  = Math.floor(n / 1000000);
+    const milhares = Math.floor((n % 1000000) / 1000);
+    const resto    = n % 1000;
+    const partes = [];
+    if (milhoes > 0) partes.push(milhoes === 1 ? 'um milhão' : `${trescentos(milhoes)} milhões`);
+    if (milhares > 0) partes.push(milhares === 1 ? 'mil' : `${trescentos(milhares)} mil`);
+    if (resto > 0) partes.push(trescentos(resto));
+    return partes.join(' e ');
+  }
+
+  try {
+    const v = Math.max(0, Number(valor) || 0);
+    const reais = Math.floor(v);
+    const centavos = Math.round((v - reais) * 100);
+    // Regra de concordância: "um milhão DE reais" só quando o valor é um
+    // múltiplo exato de milhão (nada de milhares/unidades depois) — ex:
+    // "dois milhões de reais", mas "dois milhões e cem reais" (sem "de").
+    const ehMultiploDeMilhao = reais >= 1000000 && reais % 1000000 === 0;
+    const reaisTexto = ehMultiploDeMilhao
+      ? `${inteiroPorExtenso(reais)} de reais`
+      : `${inteiroPorExtenso(reais)} ${reais === 1 ? 'real' : 'reais'}`;
+    if (centavos === 0) return reaisTexto;
+    const centavosTexto = `${inteiroPorExtenso(centavos)} ${centavos === 1 ? 'centavo' : 'centavos'}`;
+    return `${reaisTexto} e ${centavosTexto}`;
+  } catch(e) {
+    return 'valor conforme indicado acima';
+  }
+}
+
 function fmtDateBR(d) {
   if (!d) return '—';
   const [y,m,dd] = d.split('-');
@@ -5359,7 +5816,7 @@ function renderDashboard() {
     topEl.innerHTML = topProc.length ? topProc.map(([nome,qt], i) => {
       const fillW = Math.round((qt/maxProc)*100);
       return `<div class="hbar-row">
-        <div class="hbar-label" title="${nome}">${nome}</div>
+        <div class="hbar-label" title="${escapeHtml(nome)}">${escapeHtml(nome)}</div>
         <div class="hbar-track">
           <div class="hbar-fill" style="width:${fillW}%;background:${colors[i]||colors[4]};">
             ${fillW > 20 ? `<span class="hbar-fill-pct">${qt}x</span>` : ''}
@@ -5396,8 +5853,8 @@ function renderDashboard() {
         return `<div class="dash-aniv-item">
           <div class="dash-aniv-dia">${dia}${isHoje ? ' 🎉' : ''}</div>
           <div class="dash-aniv-info">
-            <div class="dash-aniv-nome">${p.nome}</div>
-            <div class="dash-aniv-data">${p.telefone||'Sem telefone'}</div>
+            <div class="dash-aniv-nome">${escapeHtml(p.nome)}</div>
+            <div class="dash-aniv-data">${escapeHtml(p.telefone||'Sem telefone')}</div>
           </div>
           ${idade ? `<span class="dash-aniv-idade">${idade} anos</span>` : ''}
         </div>`;
@@ -5417,10 +5874,10 @@ function renderDashboard() {
     return `<div class="agenda-slot">
       <div class="agenda-time">${fmtDateBR(s.data)}<br><span style="font-size:9px;opacity:.5;">${s.hora?.slice(0,5)||''}</span></div>
       <div class="agenda-info">
-        <div class="agenda-pac">${pac?.nome||'—'}</div>
-        <div class="agenda-proc">${s.procedimento||'Consulta'}</div>
+        <div class="agenda-pac">${escapeHtml(pac?.nome||'—')}</div>
+        <div class="agenda-proc">${escapeHtml(s.procedimento||'Consulta')}</div>
       </div>
-      <span class="agenda-status ${s.status}">${s.status}</span>
+      <span class="agenda-status ${s.status}">${escapeHtml(s.status)}</span>
     </div>`;
   }).join('');
 }
@@ -5437,6 +5894,7 @@ async function savePaciente() {
     nome,
     telefone: document.getElementById('fPacTel').value.trim(),
     data_nasc: document.getElementById('fPacNasc').value,
+    convenio_id: document.getElementById('fPacConvenio').value || null,
     observacoes: document.getElementById('fPacObs').value.trim(),
     status: document.getElementById('fPacStatus').value,
   };
@@ -5589,6 +6047,8 @@ async function sendIA() {
   iaHistory.push({role:'user', content: msg});
 
   const typingEl = appendTyping();
+  const requestId = (crypto.randomUUID && crypto.randomUUID()) || String(Date.now());
+  const log = _log.child({ requestId, action: 'ia_chat', userId: _currentUid || undefined });
 
   try {
     const idToken = await _ariaAuthToken();
@@ -5608,14 +6068,26 @@ async function sendIA() {
       }),
     });
     const data = await res.json();
-    const reply = data.choices?.[0]?.message?.content || 'Não consegui processar.';
+    const reply = data.choices?.[0]?.message?.content;
+    if (!reply) {
+      // Antes: se a resposta não tivesse o formato esperado (ex: a
+      // OpenRouter devolveu um erro estruturado, rate limit, ou modelo
+      // fora do ar), o código só mostrava "Não consegui processar." sem
+      // NENHUM log — indistinguível de uma resposta vazia legítima.
+      log.error('Resposta da IA sem conteúdo esperado (choices[0].message.content ausente)', {
+        httpStatus: res.status,
+        respostaBruta: data,
+      });
+    } else {
+      log.info('Resposta da IA recebida com sucesso');
+    }
     typingEl.remove();
-    appendMsg('aria', reply);
-    iaHistory.push({role:'assistant', content: reply});
+    appendMsg('aria', reply || 'Não consegui processar.');
+    iaHistory.push({role:'assistant', content: reply || 'Não consegui processar.'});
   } catch(e) {
     typingEl.remove();
     appendMsg('aria', 'Erro ao conectar com a IA. Tente novamente em alguns instantes.');
-    console.error('IA error:', e);
+    log.error('Exceção ao conversar com a IA', { error: e });
   }
 
   document.getElementById('iaSendBtn').disabled = false;
@@ -5809,11 +6281,11 @@ async function saveAparencia() {
           user_id: _currentUid,
           nome_clinica: name
         }, { onConflict: 'user_id' });
-        if (sbErr) console.error('[ARiA] Supabase odonto_clinicas:', sbErr);
+        if (sbErr) _log.error('Falha ao atualizar odonto_clinicas (aparência)', { userId: _currentUid || undefined, error: sbErr });
       }
       showToast('Aparência salva!');
     } catch (e) {
-      console.error('[ARiA] Falha ao salvar no Firestore:', e);
+      _log.error('Falha ao salvar aparência no Firestore', { userId: _currentUid || undefined, error: e });
       showToast('Salvo localmente. Sem conexão com servidor.');
     } finally {
       if (btn) { btn.textContent = 'Salvar aparência'; btn.disabled = false; }
@@ -5849,6 +6321,7 @@ function navTo(view) {
   if (view === 'financeiro')  renderFinanceiro();
   if (view === 'prontuarios') renderProntuarios();
   if (view === 'consultas')   renderConsultas();
+  if (view === 'convenios')   renderConvenios();
 }
 
 function cap(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
@@ -5877,6 +6350,8 @@ function openModal(type) {
   document.querySelectorAll('.modal-card').forEach(c => c.style.display = 'none');
 
   if (type === 'addPac') {
+    populateConvenioSelect('fPacConvenio');
+    document.getElementById('fPacConvenio').value = '';
     document.getElementById('modalAddPac').style.display = 'block';
   }
   if (type === 'addConsulta') {
@@ -5902,6 +6377,14 @@ function openModal(type) {
     btn.textContent = 'Salvar'; btn.onclick = saveDoutor;
     document.getElementById('modalAddDoutor').querySelector('.modal-title').textContent = 'Cadastrar Doutor';
   }
+  if (type === 'addConvenio') {
+    document.getElementById('fConvenioId').value = '';
+    document.getElementById('fConvenioNome').value = '';
+    document.getElementById('fConvenioStatus').value = 'true';
+    document.getElementById('convenioModalTitle').textContent = 'Novo Convênio';
+    document.getElementById('convenioModalSaveBtn').textContent = 'Salvar';
+    document.getElementById('modalAddConvenio').style.display = 'block';
+  }
   if (type === 'addFin') {
     populatePacSelect('finModalPaciente');
     document.getElementById('finModalTitle').textContent = 'Novo Orçamento';
@@ -5919,7 +6402,7 @@ function openModal(type) {
 function populatePacSelect(id) {
   const sel = document.getElementById(id);
   sel.innerHTML = STATE.pacientes.length
-    ? STATE.pacientes.map(p => `<option value="${p.id}">${p.nome}</option>`).join('')
+    ? STATE.pacientes.map(p => `<option value="${p.id}">${escapeHtml(p.nome)}</option>`).join('')
     : '<option value="">Nenhum paciente cadastrado</option>';
 }
 
@@ -5927,7 +6410,14 @@ function populateDoutorSelect(id) {
   const sel = document.getElementById(id);
   const ativos = (STATE.doutores || []).filter(d => d.status !== 'inativo');
   sel.innerHTML = '<option value="">Sem preferência</option>' +
-    ativos.map(d => `<option value="${d.id}">${d.nome}${d.especialidade ? ' — ' + d.especialidade : ''}</option>`).join('');
+    ativos.map(d => `<option value="${d.id}">${escapeHtml(d.nome)}${d.especialidade ? ' — ' + escapeHtml(d.especialidade) : ''}</option>`).join('');
+}
+
+function populateConvenioSelect(id) {
+  const sel = document.getElementById(id);
+  const ativos = (STATE.convenios || []).filter(c => c.ativo !== false);
+  sel.innerHTML = '<option value="">Particular (sem convênio)</option>' +
+    ativos.map(c => `<option value="${c.id}">${escapeHtml(c.nome)}</option>`).join('');
 }
 
 /* ════════════════════════════════════════════
@@ -5957,10 +6447,10 @@ function renderDoutores(list) {
     div.className = 'pac-card' + (String(d.id) === String(_selectedDocId) ? ' is-selected' : '');
     div.onclick = () => selectDoutor(d.id);
     div.innerHTML = `
-      <div class="pac-avatar">${initials}</div>
+      <div class="pac-avatar">${escapeHtml(initials)}</div>
       <div class="pac-info">
-        <div class="pac-name">${d.nome||'—'}</div>
-        <div class="pac-meta">${d.especialidade||''}${d.cro ? (d.especialidade?' · ':'')+'CRO: '+d.cro : ''}</div>
+        <div class="pac-name">${escapeHtml(d.nome||'—')}</div>
+        <div class="pac-meta">${escapeHtml(d.especialidade||'')}${d.cro ? (d.especialidade?' · ':'')+'CRO: '+escapeHtml(d.cro) : ''}</div>
       </div>
       <span class="pac-badge ${isAtivo ? 'ativo' : 'inativo'}">${isAtivo ? 'ATIVO' : 'INATIVO'}</span>`;
     frag.appendChild(div);
@@ -5989,9 +6479,9 @@ function selectDoutor(id) {
   badge.className = 'pac-hero-badge ' + (d.status === 'inativo' ? 'inativo' : 'ativo');
 
   const metaParts = [];
-  if (d.especialidade) metaParts.push(d.especialidade);
-  if (d.cro) metaParts.push('CRO: ' + d.cro);
-  if (d.telefone) metaParts.push(d.telefone);
+  if (d.especialidade) metaParts.push(escapeHtml(d.especialidade));
+  if (d.cro) metaParts.push('CRO: ' + escapeHtml(d.cro));
+  if (d.telefone) metaParts.push(escapeHtml(d.telefone));
   document.getElementById('docHeroMeta').innerHTML = metaParts.join('<span class="dot"> · </span>') || '—';
 
   const consultas = (STATE.consultas||[]).filter(c => String(c.doutor_id) === String(id));
@@ -6014,8 +6504,8 @@ function selectDoutor(id) {
       const pac = STATE.pacientes.find(x => String(x.id) === String(c.paciente_id));
       return `<div class="pac-row" style="--row-rgb:92,141,239">
         <div class="pac-row-date">${fmtDateBR(c.data)}</div>
-        <div class="pac-row-main"><div class="pac-row-title">${pac?.nome||'—'}</div><div class="pac-row-sub">${c.procedimento||'Consulta'}</div></div>
-        <span class="pac-row-badge ${c.status||'pendente'}">${c.status||'pendente'}</span>
+        <div class="pac-row-main"><div class="pac-row-title">${escapeHtml(pac?.nome||'—')}</div><div class="pac-row-sub">${escapeHtml(c.procedimento||'Consulta')}</div></div>
+        <span class="pac-row-badge ${c.status||'pendente'}">${escapeHtml(c.status||'pendente')}</span>
       </div>`;
     }).join('');
   } else {
@@ -6025,9 +6515,9 @@ function selectDoutor(id) {
   // Info block
   document.getElementById('docInfoBlock').innerHTML = `
     <div style="display:flex;flex-direction:column;gap:8px;">
-      ${d.especialidade ? `<div class="pac-row" style="--row-rgb:92,141,239"><div class="pac-row-main"><div class="pac-row-sub">ESPECIALIDADE</div><div class="pac-row-title">${d.especialidade}</div></div></div>` : ''}
-      ${d.cro ? `<div class="pac-row" style="--row-rgb:92,141,239"><div class="pac-row-main"><div class="pac-row-sub">CRO</div><div class="pac-row-title">${d.cro}</div></div></div>` : ''}
-      ${d.telefone ? `<div class="pac-row" style="--row-rgb:92,141,239"><div class="pac-row-main"><div class="pac-row-sub">TELEFONE</div><div class="pac-row-title">${d.telefone}</div></div></div>` : ''}
+      ${d.especialidade ? `<div class="pac-row" style="--row-rgb:92,141,239"><div class="pac-row-main"><div class="pac-row-sub">ESPECIALIDADE</div><div class="pac-row-title">${escapeHtml(d.especialidade)}</div></div></div>` : ''}
+      ${d.cro ? `<div class="pac-row" style="--row-rgb:92,141,239"><div class="pac-row-main"><div class="pac-row-sub">CRO</div><div class="pac-row-title">${escapeHtml(d.cro)}</div></div></div>` : ''}
+      ${d.telefone ? `<div class="pac-row" style="--row-rgb:92,141,239"><div class="pac-row-main"><div class="pac-row-sub">TELEFONE</div><div class="pac-row-title">${escapeHtml(d.telefone)}</div></div></div>` : ''}
       ${!d.especialidade && !d.cro && !d.telefone ? '<div class="pac-empty-row">Nenhuma informação adicional.</div>' : ''}
     </div>`;
 
@@ -6039,8 +6529,8 @@ function selectDoutor(id) {
       const pac = STATE.pacientes.find(x => String(x.id) === String(c.paciente_id));
       return `<div class="pac-row" style="--row-rgb:92,141,239">
         <div class="pac-row-date">${fmtDateBR(c.data)}</div>
-        <div class="pac-row-main"><div class="pac-row-title">${pac?.nome||'—'}</div><div class="pac-row-sub">${c.procedimento||'Consulta'}</div></div>
-        <span class="pac-row-badge ${c.status||'pendente'}">${c.status||'pendente'}</span>
+        <div class="pac-row-main"><div class="pac-row-title">${escapeHtml(pac?.nome||'—')}</div><div class="pac-row-sub">${escapeHtml(c.procedimento||'Consulta')}</div></div>
+        <span class="pac-row-badge ${c.status||'pendente'}">${escapeHtml(c.status||'pendente')}</span>
       </div>`;
     }).join('');
   } else {
@@ -6141,7 +6631,106 @@ async function deleteDoutor(id) {
   showToast('Doutor removido.');
 }
 
+/* ════════════════════════════════════════════
+   CONVÊNIOS — CRUD
+════════════════════════════════════════════ */
+function renderConvenios() {
+  const el = document.getElementById('listaConvenios');
+  const busca = (document.getElementById('searchConvenio')?.value || '').toLowerCase();
+  const list = (STATE.convenios || []).filter(c => (c.nome||'').toLowerCase().includes(busca));
+  if (!list.length) {
+    el.innerHTML = '<div class="ac-empty">Nenhum convênio cadastrado.<br>Clique em + Novo para adicionar.</div>';
+    return;
+  }
+  el.innerHTML = list.map(c => {
+    const qtdPac = (STATE.pacientes||[]).filter(p => String(p.convenio_id) === String(c.id)).length;
+    return `<div class="pac-card">
+      <div class="pac-avatar">${escapeHtml((c.nome||'?').charAt(0).toUpperCase())}</div>
+      <div class="pac-info">
+        <div class="pac-name">${escapeHtml(c.nome)}</div>
+        <div class="pac-meta">${qtdPac} paciente(s) vinculado(s)</div>
+      </div>
+      <span class="pac-badge ${c.ativo === false ? 'inativo' : 'ativo'}">${c.ativo === false ? 'INATIVO' : 'ATIVO'}</span>
+      <button class="pac-act-btn icon" onclick="editConvenio('${c.id}')" title="Editar" style="flex-shrink:0;margin-left:6px;">
+        <svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
+      </button>
+      <button class="pac-act-btn icon danger" onclick="deleteConvenio('${c.id}')" title="Excluir" style="flex-shrink:0;">
+        <svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/></svg>
+      </button>
+    </div>`;
+  }).join('');
+}
 
+async function saveConvenio() {
+  const nome = document.getElementById('fConvenioNome').value.trim();
+  if (!nome) { showToast('Informe o nome do convênio'); return; }
+  const conv = {
+    id: Date.now(),
+    user_id: _currentUid,
+    nome,
+    ativo: document.getElementById('fConvenioStatus').value === 'true',
+  };
+  if (db) {
+    const {error} = await db.from('odonto_convenios').insert([conv]);
+    if (error) { showToast('Erro: '+error.message); return; }
+  }
+  STATE.convenios.push(conv);
+  renderConvenios();
+  closeModal();
+  showToast('Convênio cadastrado!');
+}
+
+function editConvenio(id) {
+  const c = STATE.convenios.find(x => String(x.id) === String(id));
+  if (!c) return;
+  document.getElementById('modalOverlay').classList.add('show');
+  document.querySelectorAll('.modal-card').forEach(el => el.style.display = 'none');
+  const card = document.getElementById('modalAddConvenio');
+  card.style.display = 'block';
+  document.getElementById('convenioModalTitle').textContent = 'Editar Convênio';
+  document.getElementById('fConvenioId').value = c.id;
+  document.getElementById('fConvenioNome').value = c.nome || '';
+  document.getElementById('fConvenioStatus').value = c.ativo === false ? 'false' : 'true';
+  document.getElementById('convenioModalSaveBtn').textContent = 'Atualizar';
+  document.getElementById('convenioModalSaveBtn').onclick = () => updateConvenio(id);
+}
+
+async function updateConvenio(id) {
+  const nome = document.getElementById('fConvenioNome').value.trim();
+  if (!nome) { showToast('Informe o nome do convênio'); return; }
+  const updates = {
+    nome,
+    ativo: document.getElementById('fConvenioStatus').value === 'true',
+  };
+  if (db) {
+    const {error} = await db.from('odonto_convenios').update(updates).eq('id', Number(id));
+    if (error) { showToast('Erro: '+error.message); return; }
+  }
+  const idx = STATE.convenios.findIndex(x => String(x.id) === String(id));
+  if (idx !== -1) STATE.convenios[idx] = { ...STATE.convenios[idx], ...updates };
+  renderConvenios();
+  closeModal();
+  document.getElementById('convenioModalSaveBtn').textContent = 'Salvar';
+  document.getElementById('convenioModalSaveBtn').onclick = saveConvenio;
+  showToast('Convênio atualizado!');
+}
+
+async function deleteConvenio(id) {
+  const qtdPac = (STATE.pacientes||[]).filter(p => String(p.convenio_id) === String(id)).length;
+  const aviso = qtdPac > 0
+    ? `Excluir este convênio? ${qtdPac} paciente(s) vinculado(s) ficarão marcados como "Particular".`
+    : 'Excluir este convênio?';
+  if (!confirm(aviso)) return;
+  if (db) {
+    const {error} = await db.from('odonto_convenios').delete().eq('id', Number(id));
+    if (error) { showToast('Erro: '+error.message); return; }
+  }
+  STATE.convenios = STATE.convenios.filter(x => String(x.id) !== String(id));
+  // Reflete localmente o "on delete set null" que já acontece no banco
+  STATE.pacientes.forEach(p => { if (String(p.convenio_id) === String(id)) p.convenio_id = null; });
+  renderConvenios();
+  showToast('Convênio removido.');
+}
 
 function editPaciente(id) {
   const p = STATE.pacientes.find(x => String(x.id) === String(id));
@@ -6154,6 +6743,8 @@ function editPaciente(id) {
   document.getElementById('fPacNome').value   = p.nome || '';
   document.getElementById('fPacTel').value    = p.telefone || '';
   document.getElementById('fPacNasc').value   = p.data_nasc || '';
+  populateConvenioSelect('fPacConvenio');
+  document.getElementById('fPacConvenio').value = p.convenio_id || '';
   document.getElementById('fPacObs').value    = p.observacoes || '';
   document.getElementById('fPacStatus').value = p.status || 'ativo';
   // troca botão salvar por update
@@ -6169,6 +6760,7 @@ async function updatePaciente(id) {
     nome,
     telefone:    document.getElementById('fPacTel').value.trim(),
     data_nasc:   document.getElementById('fPacNasc').value,
+    convenio_id: document.getElementById('fPacConvenio').value || null,
     observacoes: document.getElementById('fPacObs').value.trim(),
     status:      document.getElementById('fPacStatus').value,
   };
@@ -6593,6 +7185,8 @@ function lgTab(mode,btn){
   document.getElementById('lgPhoneField').classList.toggle('hide', mode==='login');
   document.getElementById('lgBtn').textContent=mode==='login'?'Entrar':'Criar conta';
   document.getElementById('lgError').textContent='';
+  const fw=document.getElementById('lgForgotWrap');
+  if(fw) fw.style.display = mode==='login' ? 'block' : 'none';
   const tw=document.getElementById('lgTermsWrap');
   tw.style.display=mode==='register'?'block':'none';
   if(mode==='login'){
@@ -6621,6 +7215,87 @@ function closePrivacy(){
   document.body.style.overflow='';
 }
 
+/* ════════════════════════════════════════════════════════════
+   Limite de tentativas de login (3 erros → bloqueio temporário)
+   ════════════════════════════════════════════════════════════
+   AVISO IMPORTANTE: este contador vive em localStorage, no navegador
+   da pessoa que está tentando logar — ou seja, é uma trava de
+   experiência (desestimula tentativa manual repetida), NÃO uma
+   defesa de segurança real. Alguém com intenção de força bruta
+   automatizada limpa o localStorage ou troca de navegador/aba anônima
+   e volta a tentar. A defesa de segurança de verdade contra força
+   bruta já existe no próprio Firebase Auth (o erro
+   "auth/too-many-requests" tratado abaixo é o Firebase aplicando o
+   limite dele, no servidor, por IP/conta — esse sim não tem como
+   burlar limpando dado local).
+════════════════════════════════════════════════════════════ */
+const LOGIN_MAX_ATTEMPTS = 3;
+const LOGIN_LOCK_MS = 5 * 60 * 1000; // 5 minutos
+
+function _loginAttemptsAll(){
+  try { return JSON.parse(localStorage.getItem('aria_login_attempts') || '{}'); }
+  catch(e){ return {}; }
+}
+function _loginAttemptsSave(all){
+  try { localStorage.setItem('aria_login_attempts', JSON.stringify(all)); } catch(e){}
+}
+function _loginAttemptsKey(email){ return (email||'').trim().toLowerCase(); }
+
+function _loginLockStatus(email){
+  const rec = _loginAttemptsAll()[_loginAttemptsKey(email)];
+  if (rec && rec.lockUntil && Date.now() < rec.lockUntil) {
+    return { locked: true, remainingMs: rec.lockUntil - Date.now() };
+  }
+  return { locked: false };
+}
+function _loginRecordFailure(email){
+  const all = _loginAttemptsAll();
+  const key = _loginAttemptsKey(email);
+  const rec = all[key] || { count: 0, lockUntil: 0 };
+  if (rec.lockUntil && Date.now() >= rec.lockUntil) rec.count = 0; // lock anterior já expirou
+  rec.count = (rec.count || 0) + 1;
+  if (rec.count >= LOGIN_MAX_ATTEMPTS) rec.lockUntil = Date.now() + LOGIN_LOCK_MS;
+  all[key] = rec;
+  _loginAttemptsSave(all);
+  return rec;
+}
+function _loginResetAttempts(email){
+  const all = _loginAttemptsAll();
+  delete all[_loginAttemptsKey(email)];
+  _loginAttemptsSave(all);
+}
+
+function lgForgotPassword(){
+  const email = document.getElementById('lgEmail').value.trim();
+  const errEl = document.getElementById('lgError');
+  if (!email) {
+    errEl.style.color = '#fbbf24';
+    errEl.textContent = 'Digite seu e-mail no campo acima primeiro.';
+    return;
+  }
+  const log = _log.child({ action: 'password_reset', email });
+  errEl.style.color = 'rgba(255,255,255,.5)';
+  errEl.textContent = 'Enviando...';
+  _auth.sendPasswordResetEmail(email).then(()=>{
+    errEl.style.color = '#34d399';
+    errEl.textContent = 'Se este e-mail estiver cadastrado, enviamos um link de redefinição.';
+    log.info('E-mail de redefinição de senha solicitado');
+  }).catch(e=>{
+    log.warn('Falha ao solicitar redefinição de senha', { errorCode: e.code });
+    errEl.style.color = '#f87171';
+    // Nota de segurança: mensagem de "não encontrado" é intencionalmente
+    // genérica (igual à de sucesso) para não permitir que alguém
+    // descubra, testando e-mails em massa, quais estão cadastrados no
+    // sistema (enumeração de contas).
+    const map = {
+      'auth/invalid-email': 'E-mail inválido.',
+      'auth/user-not-found': 'Se este e-mail estiver cadastrado, enviamos um link de redefinição.',
+      'auth/too-many-requests': 'Muitas tentativas. Aguarde alguns minutos.',
+    };
+    errEl.textContent = map[e.code] || 'Erro ao enviar e-mail. Tente novamente.';
+  });
+}
+
 function lgAuth(){
   const email=document.getElementById('lgEmail').value.trim();
   const pass=document.getElementById('lgPass').value;
@@ -6628,13 +7303,59 @@ function lgAuth(){
   const btn=document.getElementById('lgBtn');
   errEl.textContent='';
   if(!email||!pass){errEl.textContent='Preencha e-mail e senha.';return;}
-  if(_lgMode==='register' && !document.getElementById('lgTermsCheck').checked){
-    errEl.textContent='Aceite os Termos de Uso para continuar.';return;
+  if(_lgMode==='register'){
+    if(!document.getElementById('lgTermsCheck').checked){
+      errEl.textContent='Aceite os Termos de Uso para continuar.';return;
+    }
+    // O sistema lida com prontuário/dado de saúde (dado sensível pela
+    // LGPD) — o mínimo padrão do Firebase (6 caracteres, sem regra de
+    // complexidade) é fraco demais pra esse contexto. Exigimos 8+ com
+    // letra e número antes mesmo de chamar o Firebase.
+    if(pass.length<8 || !/[a-zA-Z]/.test(pass) || !/[0-9]/.test(pass)){
+      errEl.textContent='Senha deve ter 8+ caracteres, com letras e números.';return;
+    }
   }
   btn.classList.add('loading');btn.textContent='Aguarde...';
   const erros={'auth/invalid-email':'E-mail inválido.','auth/user-not-found':'Usuário não encontrado.','auth/wrong-password':'Senha incorreta.','auth/email-already-in-use':'E-mail já cadastrado.','auth/weak-password':'Senha fraca (mín. 6 caracteres).','auth/too-many-requests':'Muitas tentativas. Aguarde.','auth/invalid-credential':'E-mail ou senha incorretos.'};
+  // O logger mascara automaticamente o campo "email" (ex: "jo***@dominio.com")
+  // — nunca gravamos senha em lugar nenhum, nem aqui nem no objeto de erro.
+  const log = _log.child({ action: _lgMode === 'login' ? 'login' : 'register', email });
   if(_lgMode==='login'){
-    _auth.signInWithEmailAndPassword(email,pass).catch(e=>{btn.classList.remove('loading');btn.textContent='Entrar';errEl.textContent=erros[e.code]||e.message;});
+    const lock = _loginLockStatus(email);
+    if (lock.locked) {
+      const mins = Math.max(1, Math.ceil(lock.remainingMs / 60000));
+      btn.classList.remove('loading');btn.textContent='Entrar';
+      errEl.textContent = `Muitas tentativas incorretas. Tente novamente em ${mins} min ou use "Esqueci minha senha".`;
+      log.warn('Tentativa de login bloqueada (limite de tentativas)', { lockRemainingMs: lock.remainingMs });
+      return;
+    }
+    _auth.signInWithEmailAndPassword(email,pass).then(()=>{
+      _loginResetAttempts(email);
+    }).catch(e=>{
+      // Antes: falha de login não gerava NENHUM log — impossível saber
+      // depois se um usuário está sofrendo tentativas de força bruta,
+      // ou se o Firebase está fora do ar para todo mundo.
+      log.warn('Falha no login', { errorCode: e.code });
+      btn.classList.remove('loading');btn.textContent='Entrar';
+      const isSenhaErrada = ['auth/wrong-password','auth/invalid-credential','auth/user-not-found'].includes(e.code);
+      if (isSenhaErrada) {
+        // IMPORTANTE: este contador vive no localStorage do navegador —
+        // é uma trava de UX/atrito, não uma defesa de segurança real
+        // (some se o usuário limpar o navegador ou usar outro). A defesa
+        // de verdade contra força bruta é do próprio Firebase, que já
+        // devolve auth/too-many-requests quando detecta abuso no servidor.
+        const rec = _loginRecordFailure(email);
+        if (rec.lockUntil && Date.now() < rec.lockUntil) {
+          const mins = Math.max(1, Math.ceil((rec.lockUntil - Date.now()) / 60000));
+          errEl.textContent = `Muitas tentativas incorretas. Tente novamente em ${mins} min ou use "Esqueci minha senha".`;
+        } else {
+          const restantes = Math.max(LOGIN_MAX_ATTEMPTS - rec.count, 0);
+          errEl.textContent = (erros[e.code]||e.message) + (restantes > 0 ? ` (${restantes} tentativa(s) restante(s))` : '');
+        }
+      } else {
+        errEl.textContent = erros[e.code]||e.message;
+      }
+    });
   } else {
     const clinic=document.getElementById('lgClinic').value.trim()||'Minha Clínica';
     const phone=document.getElementById('lgPhone').value.trim()||'';
@@ -6642,6 +7363,18 @@ function lgAuth(){
     _auth.createUserWithEmailAndPassword(email,pass).then(async cred=>{
       const uid = cred.user.uid;
       const instanceName = 'odonto_' + uid.replace(/[^a-zA-Z0-9]/g,'').slice(0,20);
+      const ulog = log.child({ userId: uid });
+
+      // Envia o e-mail de confirmação assim que a conta é criada. O
+      // acesso ao app fica bloqueado (ver onAuthStateChanged) até o
+      // link ser clicado — reduz cadastro com e-mail falso/descartável
+      // e garante que "esqueci minha senha" chega em alguém real.
+      try {
+        await cred.user.sendEmailVerification();
+        ulog.info('E-mail de verificação enviado no cadastro');
+      } catch(veErr) {
+        ulog.warn('Falha ao enviar e-mail de verificação no cadastro', { error: veErr });
+      }
 
       // Força a renovação do ID Token logo após criar a conta. Sem isso,
       // o token usado pela primeira chamada ao /api pode ainda não estar
@@ -6650,7 +7383,11 @@ function lgAuth(){
       // abaixo falhar silenciosamente (só logava no console, sem travar
       // nem avisar o usuário) — deixando a conta sem linha em
       // odonto_clinicas e quebrando a checagem de plano depois.
-      try { await cred.user.getIdToken(true); } catch(_) {}
+      try {
+        await cred.user.getIdToken(true);
+      } catch(tokenErr) {
+        ulog.warn('Falha ao renovar ID token após criar conta', { error: tokenErr });
+      }
 
       // 1. Salva no Supabase PRIMEIRO (antes do onAuthStateChanged redirecionar)
       if(db){
@@ -6666,28 +7403,43 @@ function lgAuth(){
         };
         let {error} = await db.from('odonto_clinicas').insert(clinicaPayload);
         if(error){
-          console.error('[ARiA] Erro odonto_clinicas (tentativa 1):', JSON.stringify(error));
+          ulog.error('Falha ao salvar odonto_clinicas (tentativa 1)', { instanceName, plano: _plano, error });
           // Retry único: cobre o caso raro em que o token ainda não tinha
           // propagado mesmo após o refresh forçado acima.
           await new Promise(r=>setTimeout(r,800));
-          try { await cred.user.getIdToken(true); } catch(_) {}
+          try { await cred.user.getIdToken(true); } catch(tokenErr2) {
+            ulog.warn('Falha ao renovar ID token na 2ª tentativa', { error: tokenErr2 });
+          }
           const retry = await db.from('odonto_clinicas').insert(clinicaPayload);
           error = retry.error;
-          if(error) console.error('[ARiA] Erro odonto_clinicas (tentativa 2 - falhou):', JSON.stringify(error));
-          else console.log('[ARiA] odonto_clinicas salvo na 2ª tentativa. instance:', instanceName, '| plano:', _plano);
+          if(error) {
+            // fatal: se as duas tentativas falharem, a conta fica sem
+            // linha em odonto_clinicas — quebra a checagem de plano/trial
+            // depois. Precisa de alarme, não só um log de debug.
+            ulog.fatal('Falha ao salvar odonto_clinicas (tentativa 2 — desistindo)', { instanceName, plano: _plano, error });
+          } else {
+            ulog.info('odonto_clinicas salvo na 2ª tentativa', { instanceName, plano: _plano });
+          }
         } else {
-          console.log('[ARiA] odonto_clinicas salvo. instance:', instanceName, '| plano:', _plano);
+          ulog.info('odonto_clinicas salvo com sucesso', { instanceName, plano: _plano });
         }
       }
 
       // 2. Salva no Firebase
-      await _fsdb.collection('clinicas').doc(uid).set({nome:clinic,email,criadoEm:new Date().toISOString(),lgpd:aceiteLGPD});
+      try {
+        await _fsdb.collection('clinicas').doc(uid).set({nome:clinic,email,criadoEm:new Date().toISOString(),lgpd:aceiteLGPD});
+      } catch (fsErr) {
+        ulog.error('Falha ao salvar documento da clínica no Firestore', { error: fsErr });
+      }
 
       // 3. Atualiza estado local
       STATE.clinicName = clinic;
       localStorage.setItem('odonto_clinic_name', clinic);
       applyClinicName(clinic);
-    }).catch(e=>{btn.classList.remove('loading');btn.textContent='Criar conta';errEl.textContent=erros[e.code]||e.message;});
+    }).catch(e=>{
+      log.warn('Falha ao criar conta', { errorCode: e.code });
+      btn.classList.remove('loading');btn.textContent='Criar conta';errEl.textContent=erros[e.code]||e.message;
+    });
   }
 }
 
@@ -6719,7 +7471,7 @@ async function checkPlanoAccess(uid, _isRetry) {
       // pagamento. Em preview local (SPCK, servidor estático, etc.)
       // não existe /api de verdade pra checar nada — bloquear aqui só
       // atrapalha o desenvolvimento, então só avisa no console e libera.
-      console.warn('[ARiA] checkPlanoAccess RPC error:', error);
+      _log.warn('checkPlanoAccess: RPC get_plano_trial retornou erro', { userId: uid, error });
       if (_isLocalDevHost()) return;
       showPlanoCheckFailedWall(typeof error === 'string' ? error : (error && error.message));
       return;
@@ -6755,7 +7507,7 @@ async function checkPlanoAccess(uid, _isRetry) {
   } catch(e) {
     // Falha inesperada (rede, parsing, etc.) — mesmo princípio: bloqueia
     // em produção, libera silenciosamente em preview local sem backend.
-    console.warn('[ARiA] checkPlanoAccess:', e);
+    _log.error('Exceção em checkPlanoAccess', { userId: uid, error: e });
     if (_isLocalDevHost()) return;
     showPlanoCheckFailedWall();
   }
@@ -6804,56 +7556,125 @@ function showTrialBanner(dias) {
   document.body.appendChild(b);
 }
 
+/* Chamado quando o usuário está autenticado E com e-mail verificado —
+   é o "de fato entrou no app". Extraído do onAuthStateChanged para
+   também poder ser chamado a partir de verifyEmailCheckNow(), quando
+   a pessoa confirma o e-mail e clica em "Já confirmei, continuar". */
+async function _enterApp(user){
+  dbSetUid(user.uid);
+
+  // Listener em tempo real — só aplica se não há gravação local em andamento
+  _fsdb.collection('clinicas').doc(user.uid).onSnapshot({includeMetadataChanges:true}, snap=>{
+    // fromCache=true → dado local do SDK, não servidor → ignorar
+    // hasPendingWrites=true → write local ainda não confirmado → ignorar
+    if(snap.metadata.fromCache || snap.metadata.hasPendingWrites) return;
+    if(!snap.exists) return;
+    const nome = snap.data().nome || CONFIG.CLINIC_NAME;
+    STATE.clinicName = nome;
+    localStorage.setItem('odonto_clinic_name', nome);
+    applyClinicName(nome);
+    const inp = document.getElementById('inputClinicName');
+    if(inp && document.activeElement !== inp) inp.value = nome;
+  }, e=>_log.error('Falha no listener onSnapshot de clinicas', { userId: user.uid, error: e }));
+
+  // carregar dados do usuário após UID definido
+  if(db){ await loadAll(); await checkPlanoAccess(user.uid); } else { loadFromLocal(); }
+  // esconde login/verificação, mostra app
+  document.getElementById('verifyEmailScreen').style.display='none';
+  document.getElementById('loginScreen').classList.add('hidden');
+  if(_lgSphere){_lgSphere.destroy();_lgSphere=null;}
+  if(!_appSphere)_appSphere=new ParticleSphere(document.getElementById('sphereCanvas'),{scale:0.78});
+  // botões sair / excluir conta no sidebar
+  if(!document.getElementById('lgSignOutBtn')){
+    const b=document.createElement('div');
+    b.id='lgSignOutBtn';b.className='ac-sb-item';
+    b.style='color:#f87171;margin-top:4px;';
+    b.innerHTML='<svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4M16 17l5-5-5-5M21 12H9"/></svg> Sair';
+    b.onclick=()=>_auth.signOut();
+    document.querySelector('.ac-sb-footer').before(b);
+
+    const del=document.createElement('div');
+    del.id='lgDeleteBtn';del.className='ac-sb-item';
+    del.style='color:rgba(255,80,80,0.35);font-size:10px;margin-top:2px;';
+    del.innerHTML='<svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/></svg> Excluir conta';
+    del.onclick=()=>openDeleteAccountModal();
+    document.querySelector('.ac-sb-footer').before(del);
+
+    const bkp=document.createElement('div');
+    bkp.id='lgBackupBtn';bkp.className='ac-sb-item';
+    bkp.style='color:rgba(92,141,239,0.55);font-size:10px;margin-top:8px;border-top:1px solid rgba(92,141,239,0.07);padding-top:10px;';
+    bkp.innerHTML='<svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Backup / Importar';
+    bkp.onclick=()=>openBackupModal();
+    document.querySelector('.ac-sb-footer').before(bkp);
+  }
+}
+
+let _verifyResendCooldownUntil = 0;
+
+/* Chamado pelo botão "Já confirmei, continuar" na tela de verificação */
+async function verifyEmailCheckNow(){
+  const msgEl = document.getElementById('verifyEmailMsg');
+  msgEl.style.color = 'rgba(255,255,255,.5)';
+  msgEl.textContent = 'Verificando...';
+  try {
+    await _auth.currentUser.reload();
+    if (_auth.currentUser.emailVerified) {
+      await _enterApp(_auth.currentUser);
+    } else {
+      msgEl.style.color = '#fbbf24';
+      msgEl.textContent = 'Ainda não confirmado. Verifique sua caixa de entrada (e a pasta de spam).';
+    }
+  } catch(e) {
+    _log.error('Falha ao checar verificação de e-mail', { error: e });
+    msgEl.style.color = '#f87171';
+    msgEl.textContent = 'Erro ao verificar. Tente novamente.';
+  }
+}
+
+/* Chamado pelo link "Reenviar e-mail de confirmação" */
+async function verifyEmailResend(){
+  const msgEl = document.getElementById('verifyEmailMsg');
+  const now = Date.now();
+  if (now < _verifyResendCooldownUntil) {
+    msgEl.style.color = 'rgba(255,255,255,.4)';
+    msgEl.textContent = `Aguarde ${Math.ceil((_verifyResendCooldownUntil-now)/1000)}s para reenviar novamente.`;
+    return;
+  }
+  try {
+    await _auth.currentUser.sendEmailVerification();
+    _verifyResendCooldownUntil = now + 30000; // evita spam de clique no botão
+    msgEl.style.color = '#34d399';
+    msgEl.textContent = 'E-mail reenviado! Confira sua caixa de entrada.';
+    _log.info('E-mail de verificação reenviado', { userId: _auth.currentUser?.uid });
+  } catch(e) {
+    _log.warn('Falha ao reenviar e-mail de verificação', { errorCode: e.code, error: e });
+    msgEl.style.color = '#f87171';
+    msgEl.textContent = e.code === 'auth/too-many-requests'
+      ? 'Muitas tentativas. Aguarde alguns minutos.'
+      : 'Erro ao reenviar. Tente novamente.';
+  }
+}
+
 _auth.onAuthStateChanged(async user=>{
   if(user){
-    dbSetUid(user.uid);
-
-    // Listener em tempo real — só aplica se não há gravação local em andamento
-    _fsdb.collection('clinicas').doc(user.uid).onSnapshot({includeMetadataChanges:true}, snap=>{
-      // fromCache=true → dado local do SDK, não servidor → ignorar
-      // hasPendingWrites=true → write local ainda não confirmado → ignorar
-      if(snap.metadata.fromCache || snap.metadata.hasPendingWrites) return;
-      if(!snap.exists) return;
-      const nome = snap.data().nome || CONFIG.CLINIC_NAME;
-      STATE.clinicName = nome;
-      localStorage.setItem('odonto_clinic_name', nome);
-      applyClinicName(nome);
-      const inp = document.getElementById('inputClinicName');
-      if(inp && document.activeElement !== inp) inp.value = nome;
-    }, e=>console.warn('[ARiA] onSnapshot clinicas:', e));
-
-    // carregar dados do usuário após UID definido
-    if(db){ await loadAll(); await checkPlanoAccess(user.uid); } else { loadFromLocal(); }
-    // esconde login, mostra app
-    document.getElementById('loginScreen').classList.add('hidden');
-    if(_lgSphere){_lgSphere.destroy();_lgSphere=null;}
-    if(!_appSphere)_appSphere=new ParticleSphere(document.getElementById('sphereCanvas'),{scale:0.78});
-    // botões sair / excluir conta no sidebar
-    if(!document.getElementById('lgSignOutBtn')){
-      const b=document.createElement('div');
-      b.id='lgSignOutBtn';b.className='ac-sb-item';
-      b.style='color:#f87171;margin-top:4px;';
-      b.innerHTML='<svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4M16 17l5-5-5-5M21 12H9"/></svg> Sair';
-      b.onclick=()=>_auth.signOut();
-      document.querySelector('.ac-sb-footer').before(b);
-
-      const del=document.createElement('div');
-      del.id='lgDeleteBtn';del.className='ac-sb-item';
-      del.style='color:rgba(255,80,80,0.35);font-size:10px;margin-top:2px;';
-      del.innerHTML='<svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/><path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/></svg> Excluir conta';
-      del.onclick=()=>openDeleteAccountModal();
-      document.querySelector('.ac-sb-footer').before(del);
-
-      const bkp=document.createElement('div');
-      bkp.id='lgBackupBtn';bkp.className='ac-sb-item';
-      bkp.style='color:rgba(92,141,239,0.55);font-size:10px;margin-top:8px;border-top:1px solid rgba(92,141,239,0.07);padding-top:10px;';
-      bkp.innerHTML='<svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg> Backup / Importar';
-      bkp.onclick=()=>openBackupModal();
-      document.querySelector('.ac-sb-footer').before(bkp);
+    // Bloqueia acesso ao app até o e-mail ser confirmado. Contas
+    // criadas ANTES desta atualização não têm esse requisito retroativo
+    // — só e-mail marcado como não verificado pelo próprio Firebase
+    // entra aqui (ex: contas novas, ou logins antigos que nunca
+    // verificaram porque a checagem não existia antes).
+    if (!user.emailVerified) {
+      document.getElementById('loginScreen').classList.add('hidden');
+      document.getElementById('verifyEmailAddr').textContent = user.email || '';
+      document.getElementById('verifyEmailMsg').textContent = '';
+      document.getElementById('verifyEmailScreen').style.display = 'flex';
+      _log.info('Acesso bloqueado: e-mail ainda não verificado', { userId: user.uid });
+      return;
     }
+    await _enterApp(user);
   } else {
     dbSetUid(null);
     STATE.pacientes = []; STATE.consultas = []; STATE.prontuarios = [];
+    document.getElementById('verifyEmailScreen').style.display = 'none';
     document.getElementById('loginScreen').classList.remove('hidden');
     if(_appSphere){_appSphere.destroy();_appSphere=null;}
     if(!_lgSphere)_lgSphere=new ParticleSphere(document.getElementById('loginCanvas'),{scale:0.72});
@@ -6900,13 +7721,20 @@ function wppSetStatus(type,msg){
 /* Helper: chama o endpoint da Evolution API sempre via proxy /api,
    nunca direto — a chave da Evolution nunca chega ao navegador. */
 async function _evoCall(evoEndpoint, evoMethod = 'GET', evoBody) {
+  const log = _log.child({ action: 'evolution', evoEndpoint, evoMethod, userId: _currentUid || undefined });
   const idToken = await _ariaAuthToken();
   const res = await fetch('/api', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ action: 'evolution', idToken, evoEndpoint, evoMethod, evoBody }),
   });
-  return res.json().catch(() => ({}));
+  if (!res.ok) log.warn('Evolution API (via proxy) retornou erro HTTP', { httpStatus: res.status });
+  return res.json().catch((parseErr) => {
+    // Antes: catch(() => ({})) — resposta não-JSON virava objeto vazio,
+    // indistinguível de "instância sem QR ainda" em todo o código acima.
+    log.error('Resposta da Evolution API não é JSON válido', { error: parseErr });
+    return {};
+  });
 }
 
 async function wppStartConnect(){
@@ -6920,7 +7748,14 @@ async function wppStartConnect(){
     const data = await _evoCall('/instance/create', 'POST', {instanceName:wppInstanceName,qrcode:true,integration:'WHATSAPP-BAILEYS'});
     const qr=data?.qrcode?.base64||data?.base64||null;
     if(qr)wppShowQR(qr);else setTimeout(wppFetchQR,1500);
-  }catch(e){setTimeout(wppFetchQR,1000);}
+  }catch(e){
+    // Antes: catch(e){setTimeout(wppFetchQR,1000)} — engolia qualquer erro
+    // (rede, 401, 500 da Evolution) e tentava de novo silenciosamente.
+    // Se a causa fosse permanente (ex: EVOLUTION_URL errada), o usuário
+    // ficava preso num loop infinito sem nenhuma pista do motivo.
+    _log.error('Falha ao criar instância do WhatsApp', { instanceName: wppInstanceName, error: e });
+    setTimeout(wppFetchQR,1000);
+  }
   btn.disabled=false;btn.textContent='Gerar QR Code';
 }
 
@@ -6929,7 +7764,10 @@ async function wppFetchQR(){
     const data = await _evoCall(`/instance/connect/${wppInstanceName}`);
     const qr=data?.base64||data?.qrcode?.base64||null;
     if(qr)wppShowQR(qr);else{wppSetStatus('info','Aguardando QR Code...');setTimeout(wppFetchQR,3000);}
-  }catch(e){wppSetStatus('err','Erro ao buscar QR. Verifique sua conexão.');}
+  }catch(e){
+    _log.error('Falha ao buscar QR Code do WhatsApp', { instanceName: wppInstanceName, error: e });
+    wppSetStatus('err','Erro ao buscar QR Code. Verifique sua conexão.');
+  }
 }
 
 function wppShowQR(base64){
@@ -6947,7 +7785,13 @@ async function wppCheckStatus(){
     const data = await _evoCall(`/instance/connectionState/${wppInstanceName}`);
     const state=data?.instance?.state||data?.state||'';
     if(state==='open'){clearInterval(wppPollInterval);wppPollInterval=null;wppOnConnected();}
-  }catch(e){}
+  }catch(e){
+    // Antes: catch(e){} — o PIOR silêncio do arquivo. Isso roda em
+    // polling a cada 5s; se a Evolution API cair ou o token expirar,
+    // o usuário fica preso na tela de QR Code indefinidamente, sem
+    // absolutamente nenhum log ou sinal do motivo real.
+    _log.error('Falha ao checar status da conexão do WhatsApp (polling)', { instanceName: wppInstanceName, error: e });
+  }
 }
 
 async function wppOnConnected(){
@@ -6966,17 +7810,30 @@ async function wppOnConnected(){
 async function wppSalvarSupabase(numero){
   if(!_currentUid)return;
   try{
-    await db.from('contatos').upsert({
+    const { error } = await db.from('contatos').upsert({
       usuario_id:_currentUid,
       whatsapp:numero||'',
       instance_name:wppInstanceName
     },{onConflict:'usuario_id'});
-  }catch(e){console.error('[ARiA Odonto wpp]',e);}
+    // Lembrete: db.from(...).upsert() nunca lança exceção (ver nota em
+    // loadAll) — o erro real vem em `.error`, não em catch. Checamos
+    // explicitamente para não perder silenciosamente essa falha.
+    if (error) _log.error('Falha ao salvar contato do WhatsApp no Supabase', { instanceName: wppInstanceName, error });
+  }catch(e){
+    _log.error('Exceção ao salvar contato do WhatsApp', { instanceName: wppInstanceName, error: e });
+  }
 }
 
 async function wppDisconnect(){
   if(!confirm('Desconectar WhatsApp?'))return;
-  try{ await _evoCall(`/instance/logout/${wppInstanceName}`, 'DELETE'); }catch(_){}
+  try{
+    await _evoCall(`/instance/logout/${wppInstanceName}`, 'DELETE');
+  }catch(e){
+    // Antes: catch(_){} silencioso. Aqui é aceitável seguir com o logout
+    // local mesmo se a chamada remota falhar, mas registramos o motivo
+    // (ex: instância já removida do lado da Evolution) para investigação.
+    _log.warn('Falha ao desconectar instância remota do WhatsApp (prosseguindo com logout local)', { instanceName: wppInstanceName, error: e });
+  }
   wppConnected=false;wppInstanceName='';
   localStorage.removeItem('aria_odonto_wpp_instance');
   localStorage.removeItem('aria_odonto_wpp_connected');
@@ -7087,24 +7944,45 @@ async function confirmDeleteAccount(){
   try {
     const user = _auth.currentUser;
     const email = user.email;
+    const uid = user.uid;
+    const log = _log.child({ action: 'delete_account', userId: uid });
 
     // 1. Re-autenticar (obrigatório pelo Firebase para operações sensíveis)
     const credential = firebase.auth.EmailAuthProvider.credential(email, pass);
     await user.reauthenticateWithCredential(credential);
 
-    const uid = user.uid;
-
     // 2. Excluir dados do Supabase (pacientes, consultas, prontuários)
+    // IMPORTANTE (LGPD — direito ao esquecimento): Promise.allSettled()
+    // nunca lança exceção e, antes, o resultado nem era lido — se o
+    // Supabase recusasse alguma exclusão (ex: RLS, coluna renomeada),
+    // isso passava despercebido e o usuário via "conta excluída com
+    // sucesso" com dados pessoais órfãos ainda no banco. Agora
+    // verificamos cada resultado e registramos falhas parciais.
     if(db){
-      await Promise.allSettled([
+      const resultados = await Promise.allSettled([
         db.from('odonto_pacientes').delete().eq('user_id', uid),
         db.from('odonto_consultas').delete().eq('user_id', uid),
         db.from('odonto_prontuarios').delete().eq('user_id', uid),
       ]);
+      const tabelas = ['odonto_pacientes','odonto_consultas','odonto_prontuarios'];
+      resultados.forEach((r, i) => {
+        if (r.status === 'rejected') {
+          log.fatal('Falha ao excluir dados do usuário (LGPD) — exceção', { tabela: tabelas[i], error: r.reason });
+        } else if (r.value && r.value.error) {
+          log.fatal('Falha ao excluir dados do usuário (LGPD) — erro retornado', { tabela: tabelas[i], error: r.value.error });
+        }
+      });
     }
 
     // 3. Excluir documento da clínica no Firestore
-    try { await _fsdb.collection('clinicas').doc(uid).delete(); } catch(_){}
+    try {
+      await _fsdb.collection('clinicas').doc(uid).delete();
+    } catch(fsErr) {
+      // Antes: catch(_){} — igual ao caso acima, um dado pessoal
+      // (documento da clínica) podia sobreviver à "exclusão de conta"
+      // sem nenhum registro do motivo.
+      log.fatal('Falha ao excluir documento da clínica no Firestore (LGPD)', { error: fsErr });
+    }
 
     // 4. Limpar localStorage
     ['odonto_clinic_name','odonto_accent','odonto_bg','aria_odonto_wpp_instance',
@@ -7113,6 +7991,7 @@ async function confirmDeleteAccount(){
     // 5. Excluir conta do Firebase Auth (deve ser o último passo)
     await user.delete();
 
+    log.info('Conta e dados excluídos com sucesso');
     closeDeleteAccountModal();
     showToast('Conta excluída com sucesso.');
 
@@ -7125,6 +8004,7 @@ async function confirmDeleteAccount(){
       'auth/requires-recent-login': 'Sessão expirada. Saia e entre novamente.',
       'auth/network-request-failed': 'Sem conexão. Tente novamente.',
     };
+    _log.error('Falha no fluxo de exclusão de conta', { userId: _auth?.currentUser?.uid, errorCode: e.code, error: e });
     errEl.textContent = erros[e.code] || ('Erro: ' + e.message);
   }
 }
@@ -7238,10 +8118,10 @@ function renderConsultas() {
     div.innerHTML = `
       <div class="agenda-time">${s.data ? fmtDateBR(s.data) : '—'}<br><span style="font-size:10px;opacity:.5;">${s.hora?.slice(0,5)||''}</span></div>
       <div class="agenda-info">
-        <div class="agenda-pac">${pac?.nome||'Paciente removido'}</div>
-        <div class="agenda-proc">${s.procedimento||'Consulta'}${doc ? ' · <span style="color:var(--ac-accent);opacity:.8;">'+doc.nome+'</span>' : ''}</div>
+        <div class="agenda-pac">${escapeHtml(pac?.nome||'Paciente removido')}</div>
+        <div class="agenda-proc">${escapeHtml(s.procedimento||'Consulta')}${doc ? ' · <span style="color:var(--ac-accent);opacity:.8;">'+escapeHtml(doc.nome)+'</span>' : ''}</div>
       </div>
-      <span class="agenda-status ${s.status||'pendente'}">${s.status||'pendente'}</span>
+      <span class="agenda-status ${s.status||'pendente'}">${escapeHtml(s.status||'pendente')}</span>
       <div class="card-actions">
         <button class="card-btn edit" onclick="editConsulta('${s.id}')" title="Editar">
           <svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
@@ -7273,6 +8153,68 @@ function openFinModal(pacienteId) {
 
 let _selectedFinPacId = null;
 
+/* ════════════════════════════════════════════
+   METAS — recebido do mês vs meta definida
+════════════════════════════════════════════ */
+function renderMetaCard() {
+  const semValorEl = document.getElementById('metaMesSemValor');
+  const comValorEl = document.getElementById('metaMesComValor');
+  if (!semValorEl || !comValorEl) return;
+
+  const meta = Number(STATE.metaMesValor || 0);
+  if (meta <= 0) {
+    semValorEl.style.display = 'block';
+    comValorEl.style.display = 'none';
+    return;
+  }
+  semValorEl.style.display = 'none';
+  comValorEl.style.display = 'block';
+
+  const mesAtual = _mesAtualISO();
+  const recebido = (STATE.financeiro || [])
+    .filter(x => x.status === 'pago' && String(x.data_item || x.criado_em || '').slice(0,7) === mesAtual)
+    .reduce((s,x) => s + Number(x.valor||0), 0);
+
+  const pct = Math.min(100, Math.round((recebido / meta) * 100));
+  document.getElementById('metaMesRecebido').textContent = 'R$ ' + recebido.toFixed(2).replace('.',',');
+  document.getElementById('metaMesAlvo').textContent = 'de R$ ' + meta.toFixed(2).replace('.',',');
+  document.getElementById('metaMesBarra').style.width = pct + '%';
+  document.getElementById('metaMesBarra').style.background = pct >= 100
+    ? 'linear-gradient(90deg,rgba(52,211,153,.9),rgba(52,211,153,.9))'
+    : 'linear-gradient(90deg,rgba(92,141,239,.9),rgba(52,211,153,.9))';
+  document.getElementById('metaMesPct').textContent = pct + '%' + (pct >= 100 ? ' 🎉 Meta batida!' : '');
+}
+
+function abrirEdicaoMeta() {
+  const atual = Number(STATE.metaMesValor || 0);
+  const input = prompt('Qual a meta de faturamento para este mês? (R$)', atual > 0 ? atual.toFixed(2) : '');
+  if (input === null) return; // cancelou
+  const valor = Number(String(input).replace(',', '.'));
+  if (isNaN(valor) || valor < 0) { showToast('Valor inválido'); return; }
+  salvarMetaMes(valor);
+}
+
+async function salvarMetaMes(valor) {
+  const mesAtual = _mesAtualISO();
+  const log = _log.child({ action: 'salvar_meta', userId: _currentUid || undefined });
+  if (db) {
+    // upsert por (user_id, mes) — a constraint UNIQUE da tabela garante
+    // que isso atualiza a meta existente do mês em vez de duplicar.
+    const { error } = await db.from('odonto_metas').upsert(
+      { id: Date.now(), user_id: _currentUid, mes: mesAtual, valor_meta: valor },
+      { onConflict: 'user_id,mes' }
+    );
+    if (error) {
+      log.error('Falha ao salvar meta do mês', { error });
+      showToast('Erro ao salvar meta: ' + error.message);
+      return;
+    }
+  }
+  STATE.metaMesValor = valor;
+  renderMetaCard();
+  showToast('Meta atualizada!');
+}
+
 function renderFinanceiro() {
   const listEl = document.getElementById('listaFinanceiro');
   if (!listEl) return;
@@ -7291,6 +8233,8 @@ function renderFinanceiro() {
   if (fgTotal) fgTotal.textContent = 'R$ ' + gTotal.toFixed(2).replace('.',',');
   if (fgPago)  fgPago.textContent  = 'R$ ' + gPago.toFixed(2).replace('.',',');
   if (fgPend)  fgPend.textContent  = 'R$ ' + gPendente.toFixed(2).replace('.',',');
+
+  renderMetaCard();
 
   const badge = document.getElementById('sbBadgeFin');
   const pendCount = allFin.filter(x => x.status !== 'pago' && x.status !== 'cancelado').length;
@@ -7319,9 +8263,9 @@ function renderFinanceiro() {
     const initials = g.nome.split(' ').map(w=>w[0]).slice(0,2).join('').toUpperCase();
     const isSelected = String(g.pacId) === String(_selectedFinPacId);
     return `<div class="pac-card ${isSelected ? 'is-selected' : ''}" onclick="selectFinPaciente('${g.pacId}')">
-      <div class="pac-avatar">${initials}</div>
+      <div class="pac-avatar">${escapeHtml(initials)}</div>
       <div class="pac-info">
-        <div class="pac-name">${g.nome}</div>
+        <div class="pac-name">${escapeHtml(g.nome)}</div>
         <div class="pac-meta">${g.items.length} item(s) · Pendente: R$ ${pend.toFixed(2).replace('.',',')}</div>
       </div>
       ${pend > 0 ? `<span class="pac-badge" style="background:rgba(251,191,36,.1);border:1px solid rgba(251,191,36,.3);color:rgba(251,191,36,.9);">R$</span>` : `<span class="pac-badge ativo">PAGO</span>`}
@@ -7357,9 +8301,12 @@ function selectFinPaciente(pacId) {
   document.getElementById('finDetailLista').innerHTML = items.length
     ? items.map(item => `<div class="pac-row" style="--row-rgb:92,141,239">
         <div class="pac-row-date">${item.data_item?fmtDateBR(item.data_item):'—'}</div>
-        <div class="pac-row-main"><div class="pac-row-title">${item.procedimento||'—'}</div><div class="pac-row-sub">${item.forma_pagamento?(formaLabel[item.forma_pagamento]||item.forma_pagamento):'—'}</div></div>
+        <div class="pac-row-main"><div class="pac-row-title">${escapeHtml(item.procedimento||'—')}</div><div class="pac-row-sub">${escapeHtml(item.forma_pagamento?(formaLabel[item.forma_pagamento]||item.forma_pagamento):'—')}</div></div>
         <div class="pac-row-right">R$ ${Number(item.valor||0).toFixed(2).replace('.',',')}</div>
-        <span class="pac-row-badge ${finBadge(item.status)}">${(item.status||'orçado').toUpperCase()}</span>
+        <span class="pac-row-badge ${finBadge(item.status)}">${escapeHtml((item.status||'orçado').toUpperCase())}</span>
+        ${item.status === 'pago' ? `<button class="pac-act-btn icon" onclick="gerarReciboPDF('${item.id}')" title="Gerar recibo" style="flex-shrink:0;">
+          <svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path d="M4 2h13l3 3v17H4z"/><path d="M9 8h6M9 12h6M9 16h3"/></svg>
+        </button>` : ''}
         <button class="pac-act-btn icon" onclick="editFinItem('${item.id}')" title="Editar" style="flex-shrink:0;">
           <svg width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7"/><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/></svg>
         </button>
@@ -7578,6 +8525,7 @@ function _getAllOdontogramaKeys() {
 
 function doExportBackup() {
   const statusEl = document.getElementById('backupStatus');
+  const log = _log.child({ action: 'export_backup', userId: _currentUid || undefined });
   try {
     const backup = {
       versao: '1.0',
@@ -7610,9 +8558,19 @@ function doExportBackup() {
 
     statusEl.style.color = 'rgba(100,220,130,0.8)';
     statusEl.textContent = '✓ Backup exportado com sucesso!';
+    // Só contamos registros — NUNCA logar prontuários/pacientes/financeiro
+    // completos, mesmo em sucesso: são dados clínicos (categoria especial
+    // pela LGPD), e um log não é o lugar pra eles existirem em texto puro.
+    log.info('Backup exportado com sucesso', {
+      qtdPacientes: backup.dados.pacientes.length,
+      qtdConsultas: backup.dados.consultas.length,
+      qtdProntuarios: backup.dados.prontuarios.length,
+      qtdFinanceiro: backup.dados.financeiro.length,
+    });
   } catch(err) {
     statusEl.style.color = 'rgba(255,100,100,0.8)';
     statusEl.textContent = 'Erro ao exportar: ' + err.message;
+    log.error('Falha ao exportar backup', { error: err });
   }
 }
 
@@ -7620,6 +8578,7 @@ function doImportBackup(input) {
   const statusEl = document.getElementById('backupStatus');
   const file = input.files[0];
   if (!file) return;
+  const log = _log.child({ action: 'import_backup', userId: _currentUid || undefined });
 
   const reader = new FileReader();
   reader.onload = async function(e) {
@@ -7639,17 +8598,41 @@ function doImportBackup(input) {
       statusEl.style.color = 'rgba(92,141,239,0.7)';
       statusEl.textContent = 'Importando dados...';
 
+      // AVISO CRÍTICO DE PERDA DE DADOS (encontrado na auditoria):
+      // db.from(...).delete()/.insert() NUNCA lançam exceção — devolvem
+      // sempre { data, error }. Antes, nenhum desses 8 resultados era
+      // verificado: se o INSERT falhasse depois do DELETE já ter rodado
+      // (ex: linha violando uma constraint, payload grande demais), o
+      // usuário perdia TODOS os dados da clínica e ainda via a mensagem
+      // "✓ Importado com sucesso!". Agora cada etapa é checada e, se
+      // qualquer insert falhar, o usuário é avisado explicitamente em
+      // vez de acreditar que está tudo certo.
+      let falhaCritica = false;
       if (db && uid) {
-        // Modo Supabase: apaga dados do usuário e insere os do backup
-        await db.from('odonto_pacientes')  .delete().eq('user_id', uid);
-        await db.from('odonto_consultas')  .delete().eq('user_id', uid);
-        await db.from('odonto_prontuarios').delete().eq('user_id', uid);
-        await db.from('odonto_financeiro') .delete().eq('user_id', uid);
+        const delRes = await Promise.all([
+          db.from('odonto_pacientes')  .delete().eq('user_id', uid),
+          db.from('odonto_consultas')  .delete().eq('user_id', uid),
+          db.from('odonto_prontuarios').delete().eq('user_id', uid),
+          db.from('odonto_financeiro') .delete().eq('user_id', uid),
+        ]);
+        const delTabelas = ['odonto_pacientes','odonto_consultas','odonto_prontuarios','odonto_financeiro'];
+        delRes.forEach((r, i) => {
+          if (r && r.error) log.error('Falha ao limpar tabela antes de importar', { tabela: delTabelas[i], error: r.error });
+        });
 
-        if (pac.length)   await db.from('odonto_pacientes')  .insert(pac);
-        if (cons.length)  await db.from('odonto_consultas')  .insert(cons);
-        if (pront.length) await db.from('odonto_prontuarios').insert(pront);
-        if (fin.length)   await db.from('odonto_financeiro') .insert(fin);
+        const inserts = [
+          pac.length   ? ['odonto_pacientes',   await db.from('odonto_pacientes')  .insert(pac)]   : null,
+          cons.length  ? ['odonto_consultas',   await db.from('odonto_consultas')  .insert(cons)]  : null,
+          pront.length ? ['odonto_prontuarios', await db.from('odonto_prontuarios').insert(pront)] : null,
+          fin.length   ? ['odonto_financeiro',  await db.from('odonto_financeiro') .insert(fin)]   : null,
+        ].filter(Boolean);
+
+        for (const [tabela, r] of inserts) {
+          if (r && r.error) {
+            falhaCritica = true;
+            log.fatal('Falha ao inserir dados importados — dados anteriores já foram apagados', { tabela, error: r.error });
+          }
+        }
       }
 
       // Salva no localStorage também (odontograma + fallback)
@@ -7671,8 +8654,17 @@ function doImportBackup(input) {
           localStorage.setItem('odonto_bg', backup.configuracoes.bgKey);
       }
 
+      if (falhaCritica) {
+        statusEl.style.color = 'rgba(255,100,100,0.8)';
+        statusEl.textContent = '⚠ Falha parcial ao importar. Verifique o console/suporte antes de continuar — alguns dados podem não ter sido restaurados.';
+        return; // não recarrega a página automaticamente num estado ruim
+      }
+
       statusEl.style.color = 'rgba(100,220,130,0.8)';
       statusEl.textContent = `✓ Importado! ${pac.length} pacientes · ${cons.length} consultas · ${pront.length} prontuários · ${fin.length} financeiros. Recarregando...`;
+      log.info('Backup importado com sucesso', {
+        qtdPacientes: pac.length, qtdConsultas: cons.length, qtdProntuarios: pront.length, qtdFinanceiro: fin.length,
+      });
 
       input.value = '';
       setTimeout(() => location.reload(), 1500);
@@ -7680,6 +8672,7 @@ function doImportBackup(input) {
     } catch(err) {
       statusEl.style.color = 'rgba(255,100,100,0.8)';
       statusEl.textContent = 'Erro ao importar: ' + err.message;
+      log.error('Exceção ao importar backup', { error: err });
       input.value = '';
     }
   };
@@ -7727,7 +8720,12 @@ function doImportBackup(input) {
     try {
       const saved = localStorage.getItem(STORAGE_KEY);
       if (saved) state = JSON.parse(saved);
-    } catch(e) {}
+    } catch(e) {
+      // Baixo risco (só reinicia o tour de onboarding), mas registramos em
+      // debug em vez de engolir por completo — ajuda a notar corrupção
+      // recorrente de localStorage sem virar ruído em produção.
+      if (typeof _log !== 'undefined') _log.debug('Estado do onboarding corrompido, reiniciando tour', { error: e });
+    }
   }
 
   function saveState() {
