@@ -541,6 +541,31 @@ body::before, body::after { content: none; }
 .pac-badge.ativo{background:rgba(52,211,153,0.08);border:1px solid rgba(52,211,153,0.2);color:rgba(52,211,153,0.7);}
 .pac-badge.inativo{background:var(--ac-surface);border:1px solid var(--ac-card-border);color:var(--ac-text-tertiary);}
 
+/* ── CRM — Kanban ── */
+.crm-board{display:flex;gap:12px;overflow-x:auto;padding-bottom:8px;align-items:flex-start;}
+.crm-col{
+  flex:0 0 250px;width:250px;background:var(--ac-surface);border:1px solid var(--ac-card-border);
+  border-radius:14px;display:flex;flex-direction:column;max-height:calc(100vh - 190px);
+}
+.crm-col.crm-dragover{border-color:rgba(var(--ac-accent-rgb),0.5);background:rgba(var(--ac-accent-rgb),0.04);}
+.crm-col-header{
+  padding:12px 12px 10px;display:flex;align-items:center;justify-content:space-between;
+  border-bottom:1px solid var(--ac-card-border);flex-shrink:0;
+}
+.crm-col-title{font-family:'Syne',sans-serif;font-size:11px;font-weight:600;color:var(--ac-text-primary);}
+.crm-col-count{font-family:'Inter Tight',sans-serif;font-size:9px;color:var(--ac-text-tertiary);background:var(--ac-card-bg);border-radius:20px;padding:2px 7px;}
+.crm-col-body{padding:8px;display:flex;flex-direction:column;gap:8px;overflow-y:auto;flex:1;min-height:60px;}
+.crm-card{
+  background:var(--ac-card-bg);border:1px solid var(--ac-card-border);border-radius:10px;
+  padding:10px 11px;cursor:grab;transition:box-shadow .15s,border-color .15s;
+}
+.crm-card:hover{border-color:rgba(var(--ac-accent-rgb),0.3);}
+.crm-card.crm-dragging{opacity:.4;}
+.crm-card-nome{font-family:'Syne',sans-serif;font-size:12px;font-weight:500;color:var(--ac-text-primary);margin-bottom:4px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.crm-card-tel{font-family:'Inter Tight',sans-serif;font-size:10px;color:var(--ac-text-tertiary);display:flex;align-items:center;justify-content:space-between;gap:6px;}
+.crm-card-wa{color:rgba(52,211,153,0.85);text-decoration:none;flex-shrink:0;display:flex;align-items:center;}
+.crm-empty-col{font-family:'Inter Tight',sans-serif;font-size:9px;color:var(--ac-text-tertiary);text-align:center;padding:14px 6px;opacity:.6;}
+
 /* Agenda slot */
 .agenda-slot{
   padding:14px 16px;border-radius:14px;
@@ -2625,6 +2650,10 @@ function escapeHtml(value) {
       Pacientes
       <span class="ac-sb-badge" id="sbBadgePac">0</span>
     </div>
+    <div class="ac-sb-item" id="navCRM" onclick="navTo('crm')">
+      <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path d="M22 3H2l8 9.46V19l4 2v-8.54L22 3z"/></svg>
+      CRM
+    </div>
     <div class="ac-sb-item" id="navDoutores" onclick="navTo('doutores')">
       <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24"><path d="M20 21v-2a4 4 0 00-4-4H8a4 4 0 00-4 4v2"/><circle cx="12" cy="7" r="4"/><path d="M12 11v4M10 13h4"/></svg>
       Doutores
@@ -3001,6 +3030,15 @@ function escapeHtml(value) {
     <div class="ac-list pac-list" id="listaConvenios" style="max-width:640px;">
       <div class="ac-empty">Nenhum convênio cadastrado.<br>Clique em + Novo para adicionar.</div>
     </div>
+  </div>
+
+  <!-- ── VIEW: CRM (Kanban) ── -->
+  <div id="viewCRM" class="ac-view">
+    <div class="ac-view-header">
+      <div class="ac-view-title">CRM</div>
+      <button class="ac-add-btn" onclick="openModal('addLead')">+ Novo Lead</button>
+    </div>
+    <div class="crm-board" id="crmBoard"></div>
   </div>
 
   <!-- ── VIEW: AGENDA ── -->
@@ -3555,6 +3593,15 @@ function escapeHtml(value) {
       <option value="ativo">Ativo</option>
       <option value="inativo">Inativo</option>
     </select>
+    <label class="modal-label">Estágio no CRM</label>
+    <select class="modal-field" id="fPacCrmStage">
+      <option value="lead">Novo Contato</option>
+      <option value="orcamento">Orçamento Enviado</option>
+      <option value="agendado">Agendado</option>
+      <option value="ativo">Em Tratamento</option>
+      <option value="inativo">Sumiu / Reativar</option>
+      <option value="perdido">Perdido</option>
+    </select>
     <div class="modal-actions">
       <button class="modal-btn-sec" onclick="closeModal()">Cancelar</button>
       <button class="modal-btn-pri" onclick="savePaciente()">Salvar</button>
@@ -3646,6 +3693,19 @@ function escapeHtml(value) {
     <div class="modal-actions">
       <button class="modal-btn-sec" onclick="closeModal()">Cancelar</button>
       <button class="modal-btn-pri" id="convenioModalSaveBtn" onclick="saveConvenio()">Salvar</button>
+    </div>
+  </div>
+
+  <!-- ADD LEAD (CRM) -->
+  <div class="modal-card" id="modalAddLead" style="display:none;">
+    <div class="modal-title">Novo Lead</div>
+    <label class="modal-label">Nome *</label>
+    <input type="text" class="modal-field" id="fLeadNome" placeholder="Nome do contato">
+    <label class="modal-label">Telefone / WhatsApp</label>
+    <input type="text" class="modal-field" id="fLeadTel" placeholder="(00) 00000-0000">
+    <div class="modal-actions">
+      <button class="modal-btn-sec" onclick="closeModal()">Cancelar</button>
+      <button class="modal-btn-pri" onclick="saveLead()">Adicionar ao CRM</button>
     </div>
   </div>
 
@@ -5688,6 +5748,72 @@ function renderStats() {
   document.getElementById('statPac').textContent   = STATE.pacientes.length || '0';
   document.getElementById('statHoje').textContent  = hoje;
   document.getElementById('statSemana').textContent= semana;
+
+  renderHomeAlerts();
+}
+
+/* ════════════════════════════════════════════
+   HOME — Avisos do dia (antes era um texto fixo
+   "Conecte o Supabase..." que nunca mudava, mesmo
+   com o Supabase já funcionando de verdade)
+════════════════════════════════════════════ */
+function renderHomeAlerts() {
+  const el = document.getElementById('homeAlerts');
+  if (!el) return;
+
+  const hojeISO = fmtDateISO(new Date());
+  const hojeMMDD = hojeISO.slice(5); // 'MM-DD'
+  const avisos = [];
+
+  // 1) Consultas de hoje (com horário da primeira, se houver)
+  const consultasHoje = (STATE.consultas || [])
+    .filter(c => c.data === hojeISO)
+    .sort((a,b) => (a.hora||'').localeCompare(b.hora||''));
+  if (consultasHoje.length > 0) {
+    const primeira = consultasHoje[0];
+    const horaTxt = primeira.hora ? primeira.hora.slice(0,5) : '';
+    avisos.push({
+      tipo: 'info', icone: '📅',
+      texto: `<strong>${consultasHoje.length}</strong> consulta${consultasHoje.length > 1 ? 's' : ''} hoje`
+        + (horaTxt ? `, a partir das <strong>${escapeHtml(horaTxt)}</strong>` : '')
+    });
+  }
+
+  // 2) Aniversariantes de hoje
+  const aniversariantes = (STATE.pacientes || []).filter(p => p.data_nasc && p.data_nasc.slice(5) === hojeMMDD);
+  if (aniversariantes.length > 0) {
+    const nomes = aniversariantes.slice(0,3).map(p => escapeHtml((p.nome||'').split(' ')[0])).join(', ');
+    avisos.push({
+      tipo: 'info', icone: '🎂',
+      texto: aniversariantes.length === 1
+        ? `Hoje é aniversário de <strong>${nomes}</strong> 🎉`
+        : `<strong>${aniversariantes.length}</strong> aniversariantes hoje: <strong>${nomes}</strong>${aniversariantes.length > 3 ? '...' : ''}`
+    });
+  }
+
+  // 3) Financeiro pendente (orçado/aprovado, ainda não pago nem cancelado)
+  const pendente = (STATE.financeiro || [])
+    .filter(f => f.status !== 'pago' && f.status !== 'cancelado')
+    .reduce((s,f) => s + Number(f.valor||0), 0);
+  if (pendente > 0) {
+    avisos.push({
+      tipo: 'warn', icone: '💰',
+      texto: `<strong>R$ ${pendente.toFixed(2).replace('.',',')}</strong> pendente de recebimento`
+    });
+  }
+
+  if (avisos.length === 0) {
+    el.innerHTML = `<div class="ac-alert info">
+      <div class="ac-alert-icon">✅</div>
+      <div class="ac-alert-txt">Nenhum aviso por hoje. Tudo em dia!</div>
+    </div>`;
+    return;
+  }
+
+  el.innerHTML = avisos.map(a => `<div class="ac-alert ${a.tipo}">
+    <div class="ac-alert-icon">${a.icone}</div>
+    <div class="ac-alert-txt">${a.texto}</div>
+  </div>`).join('');
 }
 
 function renderDashboard() {
@@ -5897,6 +6023,7 @@ async function savePaciente() {
     convenio_id: document.getElementById('fPacConvenio').value || null,
     observacoes: document.getElementById('fPacObs').value.trim(),
     status: document.getElementById('fPacStatus').value,
+    crm_stage: document.getElementById('fPacCrmStage').value || 'ativo',
   };
   if (db) {
     const {error} = await db.from('odonto_pacientes').insert([pac]);
@@ -6322,6 +6449,7 @@ function navTo(view) {
   if (view === 'prontuarios') renderProntuarios();
   if (view === 'consultas')   renderConsultas();
   if (view === 'convenios')   renderConvenios();
+  if (view === 'crm')         renderCRM();
 }
 
 function cap(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
@@ -6352,6 +6480,7 @@ function openModal(type) {
   if (type === 'addPac') {
     populateConvenioSelect('fPacConvenio');
     document.getElementById('fPacConvenio').value = '';
+    document.getElementById('fPacCrmStage').value = 'ativo';
     document.getElementById('modalAddPac').style.display = 'block';
   }
   if (type === 'addConsulta') {
@@ -6384,6 +6513,11 @@ function openModal(type) {
     document.getElementById('convenioModalTitle').textContent = 'Novo Convênio';
     document.getElementById('convenioModalSaveBtn').textContent = 'Salvar';
     document.getElementById('modalAddConvenio').style.display = 'block';
+  }
+  if (type === 'addLead') {
+    document.getElementById('fLeadNome').value = '';
+    document.getElementById('fLeadTel').value = '';
+    document.getElementById('modalAddLead').style.display = 'block';
   }
   if (type === 'addFin') {
     populatePacSelect('finModalPaciente');
@@ -6732,6 +6866,139 @@ async function deleteConvenio(id) {
   showToast('Convênio removido.');
 }
 
+/* ════════════════════════════════════════════
+   CRM — Kanban (funil de captação + reativação)
+   ════════════════════════════════════════════
+   Reaproveita a tabela odonto_pacientes (evita duplicar cadastro):
+   um "lead" é só um paciente com crm_stage='lead' e poucos dados
+   preenchidos. Ao fechar negócio, a pessoa "vira" paciente de
+   verdade só avançando de coluna — sem recadastro.
+════════════════════════════════════════════ */
+const CRM_STAGES = [
+  { key: 'lead',      label: 'Novo Contato' },
+  { key: 'orcamento', label: 'Orçamento Enviado' },
+  { key: 'agendado',  label: 'Agendado' },
+  { key: 'ativo',     label: 'Em Tratamento' },
+  { key: 'inativo',   label: 'Sumiu / Reativar' },
+  { key: 'perdido',   label: 'Perdido' },
+];
+
+function _crmStageOf(p) {
+  // Pacientes cadastrados antes da migração (ou em modo local sem
+  // Supabase) podem não ter crm_stage definido — tratamos como
+  // "Em Tratamento", que é o valor semanticamente mais correto pra
+  // quem já é paciente de fato.
+  return p.crm_stage || 'ativo';
+}
+
+function _waLink(telefone) {
+  const digits = (telefone || '').replace(/\D/g, '');
+  if (!digits) return null;
+  const comDDI = digits.length <= 11 ? '55' + digits : digits;
+  return `https://wa.me/${comDDI}`;
+}
+
+function renderCRM() {
+  const board = document.getElementById('crmBoard');
+  if (!board) return;
+
+  board.innerHTML = CRM_STAGES.map(stage => {
+    const cards = (STATE.pacientes || []).filter(p => _crmStageOf(p) === stage.key);
+    const cardsHtml = cards.length
+      ? cards.map(p => {
+          const wa = _waLink(p.telefone);
+          const iniciais = (p.nome||'?').split(' ').map(w=>w[0]).slice(0,2).join('').toUpperCase();
+          return `<div class="crm-card" draggable="true"
+              ondragstart="_crmDragStart(event,'${p.id}')"
+              ondragend="_crmDragEnd(event)"
+              onclick="editPaciente('${p.id}')">
+            <div class="crm-card-nome">${escapeHtml(p.nome || '(sem nome)')}</div>
+            <div class="crm-card-tel">
+              <span>${escapeHtml(p.telefone || 'sem telefone')}</span>
+              ${wa ? `<a class="crm-card-wa" href="${wa}" target="_blank" onclick="event.stopPropagation()" title="Abrir WhatsApp">
+                <svg width="14" height="14" fill="currentColor" viewBox="0 0 24 24"><path d="M17.5 14.4c-.3-.1-1.6-.8-1.8-.9-.2-.1-.4-.1-.6.1-.2.2-.7.9-.8 1-.2.2-.3.2-.5.1-.3-.1-1.1-.4-2.1-1.3-.8-.7-1.3-1.6-1.4-1.9-.2-.2 0-.4.1-.5l.4-.5c.1-.2.2-.3.2-.5.1-.2 0-.4 0-.5-.1-.1-.6-1.5-.8-2-.2-.5-.4-.5-.6-.5h-.5c-.2 0-.5.1-.7.3-.2.2-1 1-1 2.3s1 2.7 1.1 2.9c.1.2 2 3 4.8 4.3.7.3 1.2.5 1.6.6.7.2 1.3.2 1.8.1.6-.1 1.6-.7 1.9-1.3.2-.6.2-1.1.2-1.3-.1-.1-.3-.2-.5-.3z"/><path d="M12 2a10 10 0 00-8.5 15.2L2 22l4.9-1.3A10 10 0 1012 2z"/></svg>
+              </a>` : ''}
+            </div>
+          </div>`;
+        }).join('')
+      : `<div class="crm-empty-col">Arraste um contato pra cá</div>`;
+
+    return `<div class="crm-col" ondragover="_crmDragOver(event)" ondragleave="_crmDragLeave(event)" ondrop="_crmDrop(event,'${stage.key}')">
+      <div class="crm-col-header">
+        <span class="crm-col-title">${stage.label}</span>
+        <span class="crm-col-count">${cards.length}</span>
+      </div>
+      <div class="crm-col-body">${cardsHtml}</div>
+    </div>`;
+  }).join('');
+}
+
+let _crmDraggedId = null;
+
+function _crmDragStart(ev, pacienteId) {
+  _crmDraggedId = pacienteId;
+  ev.target.classList.add('crm-dragging');
+  ev.dataTransfer.effectAllowed = 'move';
+}
+function _crmDragEnd(ev) {
+  ev.target.classList.remove('crm-dragging');
+  _crmDraggedId = null;
+}
+function _crmDragOver(ev) {
+  ev.preventDefault();
+  ev.currentTarget.classList.add('crm-dragover');
+}
+function _crmDragLeave(ev) {
+  ev.currentTarget.classList.remove('crm-dragover');
+}
+function _crmDrop(ev, novoStage) {
+  ev.preventDefault();
+  ev.currentTarget.classList.remove('crm-dragover');
+  if (_crmDraggedId) moveCrmStage(_crmDraggedId, novoStage);
+}
+
+async function moveCrmStage(pacienteId, novoStage) {
+  const p = STATE.pacientes.find(x => String(x.id) === String(pacienteId));
+  if (!p || _crmStageOf(p) === novoStage) return;
+  const anterior = _crmStageOf(p);
+  p.crm_stage = novoStage; // otimista — atualiza a tela antes de esperar o servidor
+  renderCRM();
+  if (db) {
+    const { error } = await db.from('odonto_pacientes').update({ crm_stage: novoStage }).eq('id', Number(pacienteId));
+    if (error) {
+      // reverte em caso de falha, pra não mostrar um estado que não foi salvo
+      p.crm_stage = anterior;
+      renderCRM();
+      showToast('Erro ao mover: ' + error.message);
+      return;
+    }
+  }
+  saveLocal();
+}
+
+async function saveLead() {
+  const nome = document.getElementById('fLeadNome').value.trim();
+  if (!nome) { showToast('Informe o nome'); return; }
+  const lead = {
+    id: Date.now(),
+    user_id: _currentUid,
+    nome,
+    telefone: document.getElementById('fLeadTel').value.trim(),
+    status: 'ativo',
+    crm_stage: 'lead',
+  };
+  if (db) {
+    const { error } = await db.from('odonto_pacientes').insert([lead]);
+    if (error) { showToast('Erro: '+error.message); return; }
+  }
+  STATE.pacientes.push(lead);
+  saveLocal();
+  renderCRM();
+  renderPacientes();
+  closeModal();
+  showToast('Lead adicionado ao CRM!');
+}
+
 function editPaciente(id) {
   const p = STATE.pacientes.find(x => String(x.id) === String(id));
   if (!p) return;
@@ -6747,6 +7014,7 @@ function editPaciente(id) {
   document.getElementById('fPacConvenio').value = p.convenio_id || '';
   document.getElementById('fPacObs').value    = p.observacoes || '';
   document.getElementById('fPacStatus').value = p.status || 'ativo';
+  document.getElementById('fPacCrmStage').value = _crmStageOf(p);
   // troca botão salvar por update
   const btn = card.querySelector('.modal-btn-pri');
   btn.textContent = 'Atualizar';
@@ -6763,6 +7031,7 @@ async function updatePaciente(id) {
     convenio_id: document.getElementById('fPacConvenio').value || null,
     observacoes: document.getElementById('fPacObs').value.trim(),
     status:      document.getElementById('fPacStatus').value,
+    crm_stage:   document.getElementById('fPacCrmStage').value || 'ativo',
   };
   if (db) {
     const {error} = await db.from('odonto_pacientes').update(updates).eq('id', Number(id));
@@ -6770,7 +7039,7 @@ async function updatePaciente(id) {
   }
   const idx = STATE.pacientes.findIndex(x => String(x.id) === String(id));
   if (idx !== -1) STATE.pacientes[idx] = { ...STATE.pacientes[idx], ...updates };
-  saveLocal(); renderPacientes(); closeModal();
+  saveLocal(); renderPacientes(); renderCRM(); closeModal();
   // restaura botão
   const btn = document.getElementById('modalAddPac').querySelector('.modal-btn-pri');
   btn.textContent = 'Salvar'; btn.onclick = savePaciente;
