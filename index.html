@@ -565,6 +565,11 @@ body::before, body::after { content: none; }
 .crm-card-tel{font-family:'Inter Tight',sans-serif;font-size:10px;color:var(--ac-text-tertiary);display:flex;align-items:center;justify-content:space-between;gap:6px;}
 .crm-card-wa{color:rgba(52,211,153,0.85);text-decoration:none;flex-shrink:0;display:flex;align-items:center;}
 .crm-empty-col{font-family:'Inter Tight',sans-serif;font-size:9px;color:var(--ac-text-tertiary);text-align:center;padding:14px 6px;opacity:.6;}
+.crm-card-atrasado{border-color:rgba(251,191,36,.4)!important;background:rgba(251,191,36,.04)!important;}
+.crm-card-alerta{
+  font-family:'Inter Tight',sans-serif;font-size:9px;font-weight:600;color:rgba(251,191,36,.95);
+  background:rgba(251,191,36,.1);border-radius:5px;padding:2px 6px;display:inline-block;margin-bottom:6px;
+}
 
 /* Agenda slot */
 .agenda-slot{
@@ -3036,7 +3041,10 @@ function escapeHtml(value) {
   <div id="viewCrm" class="ac-view">
     <div class="ac-view-header">
       <div class="ac-view-title">CRM</div>
-      <button class="ac-add-btn" onclick="openModal('addLead')">+ Novo Lead</button>
+      <div style="display:flex;gap:8px;">
+        <button class="ac-add-btn" style="background:transparent;border:1px solid var(--ac-card-border);color:var(--ac-text-secondary);" onclick="openCrmConfigModal()" title="Configurar alertas de estagnação">⚙ Alertas</button>
+        <button class="ac-add-btn" onclick="openModal('addLead')">+ Novo Lead</button>
+      </div>
     </div>
     <div class="crm-board" id="crmBoard"></div>
   </div>
@@ -3504,11 +3512,6 @@ function escapeHtml(value) {
       </div>
     </div>
 
-    <div class="ac-appear-section">
-      <div class="ac-appear-label">Painel inicial — itens visíveis</div>
-      <div class="ac-widget-list" id="dashWidgetList"></div>
-    </div>
-
     <button class="ac-save-btn" onclick="saveAparencia()">Salvar aparência</button>
   </div>
 
@@ -3599,6 +3602,7 @@ function escapeHtml(value) {
       <option value="orcamento">Orçamento Enviado</option>
       <option value="agendado">Agendado</option>
       <option value="ativo">Em Tratamento</option>
+      <option value="concluido">Concluído</option>
       <option value="inativo">Sumiu / Reativar</option>
       <option value="perdido">Perdido</option>
     </select>
@@ -3706,6 +3710,29 @@ function escapeHtml(value) {
     <div class="modal-actions">
       <button class="modal-btn-sec" onclick="closeModal()">Cancelar</button>
       <button class="modal-btn-pri" onclick="saveLead()">Adicionar ao CRM</button>
+    </div>
+  </div>
+
+  <!-- CONFIGURAR ALERTAS DE ESTAGNAÇÃO DO CRM -->
+  <div class="modal-card" id="modalCrmConfig" style="display:none;">
+    <div class="modal-title">Alertas de estagnação no CRM</div>
+    <div style="font-family:'Inter Tight',sans-serif;font-size:11px;color:var(--ac-text-tertiary);line-height:1.5;margin-bottom:14px;">
+      Um card fica marcado com ⚠ quando passa desse número de dias parado no mesmo estágio, sem mudar de coluna. Ajuste conforme o ritmo da sua clínica — isso não move ninguém sozinho, só avisa.
+    </div>
+    <label class="modal-label">Novo Contato (dias)</label>
+    <input type="number" min="0" class="modal-field" id="fCrmCfgLead" placeholder="3">
+    <label class="modal-label">Orçamento Enviado (dias)</label>
+    <input type="number" min="0" class="modal-field" id="fCrmCfgOrcamento" placeholder="7">
+    <label class="modal-label">Agendado (dias)</label>
+    <input type="number" min="0" class="modal-field" id="fCrmCfgAgendado" placeholder="1">
+    <label class="modal-label">Em Tratamento (dias)</label>
+    <input type="number" min="0" class="modal-field" id="fCrmCfgAtivo" placeholder="45">
+    <label class="modal-label">Concluído — lembrete de retorno (dias)</label>
+    <input type="number" min="0" class="modal-field" id="fCrmCfgConcluido" placeholder="180">
+    <div style="font-family:'Inter Tight',sans-serif;font-size:9px;color:var(--ac-text-tertiary);margin:-6px 0 12px;">Deixe em branco ou 0 para desativar o alerta desse estágio.</div>
+    <div class="modal-actions">
+      <button class="modal-btn-sec" onclick="closeModal()">Cancelar</button>
+      <button class="modal-btn-pri" onclick="saveCrmConfig()">Salvar</button>
     </div>
   </div>
 
@@ -3969,6 +3996,9 @@ let STATE = {
   doutores: [],
   convenios: [],
   metaMesValor: 0,
+  crmAlertConfig: JSON.parse(localStorage.getItem('odonto_crm_alertas') || 'null') || {
+    lead: 3, orcamento: 7, agendado: 1, ativo: 45, concluido: 180,
+  },
   currentFilter: 'todos',
   selectedPacId: null,
   agendaDate: new Date(),
@@ -4006,10 +4036,12 @@ window.addEventListener('DOMContentLoaded', async () => {
   renderStats();
   renderDashboard();
 
-  // Aplicar/renderizar widgets após o dashboard estar montado no DOM
+  // Aplicar exibição dos widgets do dashboard (configuração fixa —
+  // a opção de personalizar quais aparecem foi removida da tela de
+  // Aparência a pedido do usuário; aqui só garante que os defaults
+  // sejam aplicados corretamente ao montar o dashboard).
   setTimeout(() => {
     try {
-      renderDashWidgetList();
       applyDashWidgets();
     } catch(e) {
       _log.error('Falha ao montar widgets do dashboard no boot', { error: e });
@@ -6024,6 +6056,7 @@ async function savePaciente() {
     observacoes: document.getElementById('fPacObs').value.trim(),
     status: document.getElementById('fPacStatus').value,
     crm_stage: document.getElementById('fPacCrmStage').value || 'ativo',
+    crm_stage_updated_at: new Date().toISOString(),
   };
   if (db) {
     const {error} = await db.from('odonto_pacientes').insert([pac]);
@@ -6357,31 +6390,6 @@ function applyDashWidgets() {
   });
 }
 
-function renderDashWidgetList() {
-  const wrap = document.getElementById('dashWidgetList');
-  if (!wrap) return;
-  wrap.innerHTML = Object.keys(DASH_WIDGET_LABELS).map(key => {
-    const checked = STATE.dashWidgets[key] !== false;
-    return `<label class="ac-widget-item"><span>${DASH_WIDGET_LABELS[key]}</span>
-      <span class="ac-switch">
-        <input type="checkbox" data-dash-key="${key}" ${checked ? 'checked' : ''} onchange="toggleDashWidget('${key}', this.checked)">
-        <span class="ac-switch-track"></span>
-      </span></label>`;
-  }).join('');
-}
-
-function toggleDashWidget(key, checked) {
-  STATE.dashWidgets[key] = checked;
-  applyDashWidgets();
-  localStorage.setItem('odonto_dash_widgets', JSON.stringify(STATE.dashWidgets));
-  const el = document.querySelector(`#viewDashboard [data-w="${key}"]`);
-  if (typeof showToast === 'function') {
-    showToast(el
-      ? (checked ? 'Widget ativado' : 'Widget ocultado')
-      : `Widget "${key}" não encontrado no painel`);
-  }
-}
-
 async function saveAparencia() {
   const name = document.getElementById('inputClinicName').value.trim() || CONFIG.CLINIC_NAME;
   const btn = document.querySelector('.ac-save-btn');
@@ -6437,7 +6445,6 @@ function navTo(view) {
 
   if (view === 'agenda')      renderAgenda();
   if (view === 'dashboard')   renderDashboard();
-  if (view === 'aparencia')   renderDashWidgetList();
   if (view === 'doutores')    renderDoutores();
   if (view === 'odontograma') {
     odAriaInit();
@@ -6879,6 +6886,7 @@ const CRM_STAGES = [
   { key: 'orcamento', label: 'Orçamento Enviado' },
   { key: 'agendado',  label: 'Agendado' },
   { key: 'ativo',     label: 'Em Tratamento' },
+  { key: 'concluido', label: 'Concluído' },
   { key: 'inativo',   label: 'Sumiu / Reativar' },
   { key: 'perdido',   label: 'Perdido' },
 ];
@@ -6889,6 +6897,21 @@ function _crmStageOf(p) {
   // "Em Tratamento", que é o valor semanticamente mais correto pra
   // quem já é paciente de fato.
   return p.crm_stage || 'ativo';
+}
+
+function _crmDiasParado(p) {
+  const desde = p.crm_stage_updated_at ? new Date(p.crm_stage_updated_at) : null;
+  if (!desde || isNaN(desde.getTime())) return null;
+  const ms = Date.now() - desde.getTime();
+  return Math.floor(ms / (1000 * 60 * 60 * 24));
+}
+
+function _crmEstaAtrasado(p) {
+  const stageKey = _crmStageOf(p);
+  const limite = Number(STATE.crmAlertConfig?.[stageKey] || 0);
+  if (!limite) return false; // alerta desativado pra esse estágio (0 ou não configurado)
+  const dias = _crmDiasParado(p);
+  return dias !== null && dias >= limite;
 }
 
 function _waLink(telefone) {
@@ -6907,11 +6930,13 @@ function renderCRM() {
     const cardsHtml = cards.length
       ? cards.map(p => {
           const wa = _waLink(p.telefone);
-          const iniciais = (p.nome||'?').split(' ').map(w=>w[0]).slice(0,2).join('').toUpperCase();
-          return `<div class="crm-card" draggable="true"
+          const atrasado = _crmEstaAtrasado(p);
+          const dias = _crmDiasParado(p);
+          return `<div class="crm-card ${atrasado ? 'crm-card-atrasado' : ''}" draggable="true"
               ondragstart="_crmDragStart(event,'${p.id}')"
               ondragend="_crmDragEnd(event)"
               onclick="editPaciente('${p.id}')">
+            ${atrasado ? `<div class="crm-card-alerta" title="Parado há ${dias} dias neste estágio">⚠ ${dias}d parado</div>` : ''}
             <div class="crm-card-nome">${escapeHtml(p.nome || '(sem nome)')}</div>
             <div class="crm-card-tel">
               <span>${escapeHtml(p.telefone || 'sem telefone')}</span>
@@ -6923,14 +6948,47 @@ function renderCRM() {
         }).join('')
       : `<div class="crm-empty-col">Arraste um contato pra cá</div>`;
 
+    const atrasadosNaColuna = cards.filter(_crmEstaAtrasado).length;
     return `<div class="crm-col" ondragover="_crmDragOver(event)" ondragleave="_crmDragLeave(event)" ondrop="_crmDrop(event,'${stage.key}')">
       <div class="crm-col-header">
-        <span class="crm-col-title">${stage.label}</span>
+        <span class="crm-col-title">${stage.label}${atrasadosNaColuna ? ` <span style="color:rgba(251,191,36,.85);">⚠${atrasadosNaColuna}</span>` : ''}</span>
         <span class="crm-col-count">${cards.length}</span>
       </div>
       <div class="crm-col-body">${cardsHtml}</div>
     </div>`;
   }).join('');
+}
+
+/* ── Configuração dos alertas de estagnação (por clínica/dispositivo) ── */
+function openCrmConfigModal() {
+  const cfg = STATE.crmAlertConfig || {};
+  document.getElementById('fCrmCfgLead').value      = cfg.lead      ?? 3;
+  document.getElementById('fCrmCfgOrcamento').value = cfg.orcamento ?? 7;
+  document.getElementById('fCrmCfgAgendado').value  = cfg.agendado  ?? 1;
+  document.getElementById('fCrmCfgAtivo').value     = cfg.ativo     ?? 45;
+  document.getElementById('fCrmCfgConcluido').value = cfg.concluido ?? 180;
+  document.getElementById('modalOverlay').classList.add('show');
+  document.querySelectorAll('.modal-card').forEach(c => c.style.display = 'none');
+  document.getElementById('modalCrmConfig').style.display = 'block';
+}
+
+function saveCrmConfig() {
+  const num = (id) => {
+    const v = Number(document.getElementById(id).value);
+    return isNaN(v) || v <= 0 ? 0 : v;
+  };
+  const cfg = {
+    lead:      num('fCrmCfgLead'),
+    orcamento: num('fCrmCfgOrcamento'),
+    agendado:  num('fCrmCfgAgendado'),
+    ativo:     num('fCrmCfgAtivo'),
+    concluido: num('fCrmCfgConcluido'),
+  };
+  STATE.crmAlertConfig = cfg;
+  try { localStorage.setItem('odonto_crm_alertas', JSON.stringify(cfg)); } catch(e) {}
+  renderCRM();
+  closeModal();
+  showToast('Alertas do CRM atualizados!');
 }
 
 let _crmDraggedId = null;
@@ -6961,13 +7019,17 @@ async function moveCrmStage(pacienteId, novoStage) {
   const p = STATE.pacientes.find(x => String(x.id) === String(pacienteId));
   if (!p || _crmStageOf(p) === novoStage) return;
   const anterior = _crmStageOf(p);
+  const anteriorData = p.crm_stage_updated_at;
+  const agora = new Date().toISOString();
   p.crm_stage = novoStage; // otimista — atualiza a tela antes de esperar o servidor
+  p.crm_stage_updated_at = agora;
   renderCRM();
   if (db) {
-    const { error } = await db.from('odonto_pacientes').update({ crm_stage: novoStage }).eq('id', Number(pacienteId));
+    const { error } = await db.from('odonto_pacientes').update({ crm_stage: novoStage, crm_stage_updated_at: agora }).eq('id', Number(pacienteId));
     if (error) {
       // reverte em caso de falha, pra não mostrar um estado que não foi salvo
       p.crm_stage = anterior;
+      p.crm_stage_updated_at = anteriorData;
       renderCRM();
       showToast('Erro ao mover: ' + error.message);
       return;
@@ -6986,6 +7048,7 @@ async function saveLead() {
     telefone: document.getElementById('fLeadTel').value.trim(),
     status: 'ativo',
     crm_stage: 'lead',
+    crm_stage_updated_at: new Date().toISOString(),
   };
   if (db) {
     const { error } = await db.from('odonto_pacientes').insert([lead]);
@@ -7024,6 +7087,10 @@ function editPaciente(id) {
 async function updatePaciente(id) {
   const nome = document.getElementById('fPacNome').value.trim();
   if (!nome) { showToast('Informe o nome'); return; }
+  const pacAtual = STATE.pacientes.find(x => String(x.id) === String(id));
+  const novoStage = document.getElementById('fPacCrmStage').value || 'ativo';
+  const stageMudou = pacAtual && _crmStageOf(pacAtual) !== novoStage;
+
   const updates = {
     nome,
     telefone:    document.getElementById('fPacTel').value.trim(),
@@ -7031,8 +7098,13 @@ async function updatePaciente(id) {
     convenio_id: document.getElementById('fPacConvenio').value || null,
     observacoes: document.getElementById('fPacObs').value.trim(),
     status:      document.getElementById('fPacStatus').value,
-    crm_stage:   document.getElementById('fPacCrmStage').value || 'ativo',
+    crm_stage:   novoStage,
   };
+  // Só reseta a contagem de "dias parado" se o estágio realmente mudou
+  // nesta edição — senão, editar telefone/observação resetaria o alerta
+  // sem motivo (o paciente não "andou" no funil só por corrigir um dado).
+  if (stageMudou) updates.crm_stage_updated_at = new Date().toISOString();
+
   if (db) {
     const {error} = await db.from('odonto_pacientes').update(updates).eq('id', Number(id));
     if (error) { showToast('Erro: '+error.message); return; }
