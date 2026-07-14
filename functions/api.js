@@ -300,7 +300,7 @@ const ALLOWED_TABLES = new Set([
 // enumerar o schema do banco por tentativa e erro. Não é SQL injection
 // (o PostgREST trata como igualdade literal), mas fecha essa superfície.
 const ALLOWED_COLUMNS = {
-  odonto_pacientes:   new Set(['id', 'nome', 'status', 'data_nasc', 'telefone', 'convenio_id']),
+  odonto_pacientes:   new Set(['id', 'nome', 'status', 'data_nasc', 'telefone', 'convenio_id', 'crm_stage', 'crm_stage_updated_at']),
   odonto_consultas:   new Set(['id', 'paciente_id', 'doutor_id', 'data', 'hora', 'status', 'procedimento']),
   odonto_prontuarios: new Set(['id', 'paciente_id', 'doutor_id', 'data', 'procedimento']),
   odonto_financeiro:  new Set(['id', 'paciente_id', 'status', 'data_item', 'criado_em']),
@@ -463,7 +463,31 @@ async function handleRequest(context, log) {
         method = 'POST';
         headers['Prefer'] = select ? 'return=representation' : 'return=minimal';
         const rows = Array.isArray(payload) ? payload : [payload];
-        sbBody = rows.map(row => ({ ...row, [userCol]: uid, id: undefined }));
+        // IMPORTANTE (bug corrigido): este código antes fazia `id: undefined`
+        // pra "nunca confiar no id vindo do cliente" — parecia uma boa
+        // prática de segurança, mas quebrava a aplicação inteira, porque
+        // TODO o front-end gera o id no cliente via `Date.now()` e reutiliza
+        // esse mesmo valor depois pra editar/excluir/referenciar aquele
+        // registro (inclusive como chave estrangeira em consultas,
+        // prontuários e financeiro apontando pro paciente).
+        //
+        // Como `Prefer: return=minimal` não devolve o registro criado, o
+        // front-end nunca ficava sabendo qual id o Postgres teria gerado
+        // sozinho — resultado: paciente aparecia normalmente na tela
+        // (cache local), mas qualquer consulta/prontuário criado depois
+        // pra ele falhava com "violates foreign key constraint", porque o
+        // id salvo no banco era diferente do id que o paciente tinha na
+        // tela. Em tabelas sem valor padrão pra `id` (ex: odonto_doutores),
+        // o insert falhava na hora com "null value in column id violates
+        // not-null constraint".
+        //
+        // Não há ganho de segurança real em bloquear o id vindo do
+        // cliente aqui: o dono do registro já é forçado no passo abaixo
+        // ([userCol]: uid), então ninguém consegue "roubar" um registro só
+        // escolhendo um id — na pior hipótese colide com outro id (o
+        // Postgres rejeita por PRIMARY KEY, e o Date.now() já torna isso
+        // extremamente improvável).
+        sbBody = rows.map(row => ({ ...row, [userCol]: uid }));
 
       } else if (op === 'update') {
         method = 'PATCH';
